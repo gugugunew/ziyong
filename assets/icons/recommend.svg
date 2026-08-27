@@ -1,0 +1,10 @@
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="recommend" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF6B6B"/>
+      <stop offset="1" stop-color="#FFD93D"/>
+    </linearGradient>
+  </defs>
+  <path d="M60 12 L70 48 L108 48 L77 71 L88 108 L60 84 L32 108 L43 71 L12 48 L50 48 Z" fill="url(#recommend)"/>
+  <circle cx="60" cy="60" r="13" fill="#FFF7D6"/>
+</svg>

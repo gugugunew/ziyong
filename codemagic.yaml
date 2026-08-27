@@ -1,0 +1,37 @@
+# Codemagic 云端构建 —— 只构建「未签名 IPA」
+# 不需要 Apple 开发者账号 / 不花钱 / 不连 Developer Portal
+# 构建完成后下载 app.ipa，用【爱思助手 + 免费 Apple ID】自己签名装真机（7 天有效）
+workflows:
+  ios-ipa:
+    name: iOS IPA (未签名)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+    # 注意：已去掉 ios_signing，Codemagic 不会碰 Apple 账号
+    scripts:
+      - name: 获取依赖
+        script: flutter pub get
+
+      - name: 构建未签名 iOS App 并打包成 IPA
+        script: |
+          flutter build ios --release --no-codesign
+          rm -rf Payload app.ipa
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -r -9 app.ipa Payload
+
+    artifacts:
+      - app.ipa
+
+    publishing:
+      email:
+        recipients:
+          - you@example.com
+        notify:
+          success: true
+          failure: true

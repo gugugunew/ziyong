@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Melody App</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+    iframe { width: 100%; height: 100%; border: none; display: block; background: #000; }
+  </style>
+</head>
+<body>
+  <iframe src="index.html" id="appFrame"></iframe>
+  <script>
+    (function(){
+      var frame = document.getElementById('appFrame');
+      var last = null;
+      function check(){
+        fetch('__build_id.txt', {cache: 'no-store'})
+          .then(function(r){ return r.text(); })
+          .then(function(t){
+            t = (t || '').trim();
+            if (last === null) last = t;
+            else if (last !== t && t) frame.src = frame.src;
+          }).catch(function(){});
+      }
+      setInterval(check, 1500);
+    })();
+  </script>
+</body>
+</html>
