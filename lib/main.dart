@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -362,11 +364,26 @@ class GlassTabBar extends StatelessWidget {
     ];
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 0, 18, 20),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(barRadius),
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
-          child: Container(
+      child: Stack(
+        children: [
+          // 底层：高斯模糊背景。比上层稍大一圈，避免 ClipRRect 裁剪 BackdropFilter
+          // 时边缘采样不到像素而产生的暗边/阴影。
+          Positioned(
+            left: -4,
+            right: -4,
+            top: -4,
+            bottom: -4,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(barRadius + 4),
+              child: BackdropFilter(
+                filter: ui.ImageFilter.blur(
+                    sigmaX: blurSigma, sigmaY: blurSigma),
+                child: Container(color: Colors.transparent),
+              ),
+            ),
+          ),
+          // 上层：玻璃面板（边框、底色、高光、内阴影、标签）
+          Container(
             height: barHeight,
             decoration: BoxDecoration(
               // 玻璃底色：提高不透明度，保证文字可读（暗色更实、亮色半透）
@@ -425,7 +442,7 @@ class GlassTabBar extends StatelessWidget {
               ],
             ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -979,15 +996,20 @@ class _FeaturedCollectionBlock extends StatelessWidget {
 class _CategoryCardsSection extends StatelessWidget {
   const _CategoryCardsSection();
 
-  static const List<String> _images = [
-    'assets/images/cishu_1.png',
-    'assets/images/cishu_2.png',
-    'assets/images/cishu_3.png',
-    'assets/images/cishu_4.png',
-    'assets/images/cishu_5.png',
-    'assets/images/cishu_6.png',
-    'assets/images/cishu_7.png',
-    'assets/images/cishu_8.png',
+  static const List<_WordBook> _books = [
+    _WordBook(
+      '小学英语大纲词汇',
+      'assets/images/xiaoxue_english_vocabulary.jpg',
+      xiaoxueWords,
+    ),
+    _WordBook('词书·自然拼读', 'assets/images/cishu_1.png', []),
+    _WordBook('词书·情景对话', 'assets/images/cishu_2.png', []),
+    _WordBook('词书·看图识词', 'assets/images/cishu_3.png', []),
+    _WordBook('词书·高频词', 'assets/images/cishu_4.png', []),
+    _WordBook('词书·主题分类', 'assets/images/cishu_5.png', []),
+    _WordBook('词书·词汇进阶', 'assets/images/cishu_6.png', []),
+    _WordBook('词书·趣味记忆', 'assets/images/cishu_7.png', []),
+    _WordBook('词书·考前冲刺', 'assets/images/cishu_8.png', []),
   ];
 
   // 统一书封尺寸（调小整体高度）
@@ -1015,23 +1037,45 @@ class _CategoryCardsSection extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Row(
-                crossAxisAlignment: CrossAxisAlignment.baseline,
-                textBaseline: TextBaseline.alphabetic,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Text(
                     '单词',
                     style: TextStyle(
                       color: textColor,
-                      fontSize: 26,
+                      fontSize: 22,
                       fontWeight: FontWeight.w700,
-                      letterSpacing: -0.6,
+                      letterSpacing: -0.5,
                     ),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 4),
                   Icon(
                     Icons.chevron_right,
                     color: textColor.withValues(alpha: 0.35),
-                    size: 26,
+                    size: 22,
+                  ),
+                  const Spacer(),
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {},
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '显示全部',
+                          style: TextStyle(
+                            color: textColor.withValues(alpha: 0.5),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        Icon(
+                          Icons.chevron_right,
+                          color: textColor.withValues(alpha: 0.4),
+                          size: 18,
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -1071,9 +1115,23 @@ class _CategoryCardsSection extends StatelessWidget {
                     crossAxisSpacing: 12,
                     childAspectRatio: _cardH / _cardW, // 竖向书封比例
                   ),
-                  itemCount: _images.length,
+                  itemCount: _books.length,
                   itemBuilder: (context, index) {
-                    return _CategoryBookCover(imageAsset: _images[index]);
+                    final book = _books[index];
+                    return _CategoryBookCover(
+                      book: book,
+                      onTap: () async {
+                        // 进入词表页期间暂停主页 Banner 自动滚动（性能 + 视觉）
+                        _bannerAuto.pause();
+                        await Navigator.of(context).push(
+                          CupertinoPageRoute(
+                            builder: (_) => _WordListPage(book: book),
+                          ),
+                        );
+                        // pop 后恢复（无副作用：仅通知 Banner 监听者）
+                        _bannerAuto.resume();
+                      },
+                    );
                   },
                 ),
               ),
@@ -1085,57 +1143,77 @@ class _CategoryCardsSection extends StatelessWidget {
   }
 }
 
-// 单个词书封面：固定 104×138，完整展示图片，底部带柔和书影
+// 单个词书封面：固定 104×138，完整展示图片，底部带柔和书影，可点击进入词表
 class _CategoryBookCover extends StatelessWidget {
-  final String imageAsset;
-  const _CategoryBookCover({required this.imageAsset});
+  final _WordBook book;
+  final VoidCallback onTap;
+  const _CategoryBookCover({required this.book, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: _CategoryCardsSection._cardW,
-      height: _CategoryCardsSection._cardH,
-      alignment: Alignment.center,
-      child: Stack(
-        alignment: Alignment.bottomCenter,
-        children: [
-          // 底部书影： screenshot 风格的柔和矩形阴影
-          Positioned(
-            bottom: -2,
-            left: 4,
-            right: 4,
-            child: Container(
-              height: 6,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(4),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.20),
-                    blurRadius: 18,
-                    spreadRadius: 4,
-                    offset: const Offset(0, 10),
-                  ),
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.10),
-                    blurRadius: 8,
-                    spreadRadius: 1,
-                    offset: const Offset(0, 6),
-                  ),
-                ],
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        width: _CategoryCardsSection._cardW,
+        height: _CategoryCardsSection._cardH,
+        alignment: Alignment.center,
+        child: Stack(
+          alignment: Alignment.bottomCenter,
+          children: [
+            // 底部书影： screenshot 风格的柔和矩形阴影
+            Positioned(
+              bottom: -2,
+              left: 4,
+              right: 4,
+              child: Container(
+                height: 6,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.20),
+                      blurRadius: 18,
+                      spreadRadius: 4,
+                      offset: const Offset(0, 10),
+                    ),
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.10),
+                      blurRadius: 8,
+                      spreadRadius: 1,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          // 书封图片
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.asset(
-              imageAsset,
-              width: _CategoryCardsSection._cardW,
-              height: _CategoryCardsSection._cardH,
-              fit: BoxFit.contain,
+            // 书封图片：完整显示上传的原图（BoxFit.contain 不裁剪），加 surface 背景让留白不突兀
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                width: _CategoryCardsSection._cardW,
+                height: _CategoryCardsSection._cardH,
+                color: Theme.of(context).brightness == Brightness.dark
+                    ? const Color(0xFF1C1C1E)
+                    : const Color(0xFFF2F2F7),
+                child: Image.asset(
+                  book.cover,
+                  fit: BoxFit.contain,
+                  cacheWidth: 320,
+                  frameBuilder: (context, child, frame, sync) {
+                    if (sync) return child;
+                    return AnimatedOpacity(
+                      opacity: frame == null ? 0 : 1,
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOut,
+                      child: child,
+                    );
+                  },
+                ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1196,13 +1274,26 @@ class _CategoryBannerState extends State<_CategoryBanner> {
       viewportFraction: _viewportFraction,
     );
     _startAutoScroll();
+    _bannerAuto.addListener(_onBannerAutoChange);
   }
 
   @override
   void dispose() {
     _autoTimer?.cancel();
     _pageController.dispose();
+    _bannerAuto.removeListener(_onBannerAutoChange);
     super.dispose();
+  }
+
+  // 主页进入词表页时暂停自动滚动，pop 后恢复 —— 节省性能 + 视觉不乱
+  void _onBannerAutoChange() {
+    if (!mounted) return;
+    if (_bannerAuto.paused) {
+      _autoTimer?.cancel();
+      _autoTimer = null;
+    } else {
+      _startAutoScroll();
+    }
   }
 
   void _startAutoScroll() {
@@ -1592,9 +1683,9 @@ class _BookSection extends StatelessWidget {
                         title,
                         style: TextStyle(
                           color: textColor,
-                          fontSize: 21,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.4,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.5,
                         ),
                       ),
                       const SizedBox(height: 4),
@@ -2083,4 +2174,1172 @@ class _DottedAvatarRing extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║  单词数据模型 + 词表页                                               ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
+/// 单个单词：英文 + 音标 + 中文释义
+class Word {
+  final String text;
+  final String phonetic;
+  final String meaning;
+  const Word(this.text, this.phonetic, this.meaning);
+}
+
+/// 用户学习数据库（mock）：实际应持久化到 SharedPreferences/SQLite。
+/// 预置 90 个词已学，演示 "90 / 100" 完成度；其中 one..ten 这 10 个数字词模拟未背诵。
+const Set<String> _userLearnedWords = {
+  'apple', 'banana', 'cat', 'dog', 'book', 'pen', 'pencil',
+  'red', 'blue', 'green', 'yellow', 'teacher', 'student',
+  'school', 'classroom', 'friend', 'family', 'father',
+  'mother', 'brother', 'sister', 'happy', 'sad', 'big', 'small',
+  'eat', 'drink', 'run', 'jump', 'sing', 'dance', 'read', 'write',
+  'water', 'milk', 'rice', 'egg', 'fish', 'bird', 'tree', 'flower',
+  'sun', 'moon', 'star', 'hand', 'foot', 'head', 'eye', 'ear',
+  'nose', 'mouth', 'hello', 'goodbye', 'yes', 'no', 'open', 'close',
+  'come', 'go', 'play', 'sleep', 'morning', 'evening', 'name',
+  'boy', 'girl', 'man', 'woman', 'baby', 'car', 'bus', 'bike',
+  'train', 'plane', 'ball', 'kite', 'bag', 'box', 'cup', 'chair',
+  'desk', 'door', 'window', 'bed', 'room', 'home', 'time', 'day',
+  'week', 'year',
+};
+
+/// 主页 Banner 自动滚动控制器：进入词表页时 pause，pop 后 resume。
+/// 为性能 + 视觉不乱：避免主页后台还在跑 2.5s 翻页动画。
+class _BannerAutoController extends ChangeNotifier {
+  bool _paused = false;
+  bool get paused => _paused;
+  void pause() {
+    if (_paused) return;
+    _paused = true;
+    notifyListeners();
+  }
+
+  void resume() {
+    if (!_paused) return;
+    _paused = false;
+    notifyListeners();
+  }
+}
+
+final _bannerAuto = _BannerAutoController();
+
+/// 词本：标题 + 封面 + 单词列表
+class _WordBook {
+  final String title;
+  final String cover;
+  final List<Word> words;
+  const _WordBook(this.title, this.cover, this.words);
+}
+
+/// 小学英语大纲词汇（100 词）
+const List<Word> xiaoxueWords = [
+  Word('apple', '/ˈæp.əl/', '苹果'),
+  Word('banana', '/bəˈnɑː.nə/', '香蕉'),
+  Word('cat', '/kæt/', '猫'),
+  Word('dog', '/dɒɡ/', '狗'),
+  Word('book', '/bʊk/', '书'),
+  Word('pen', '/pen/', '钢笔'),
+  Word('pencil', '/ˈpen.səl/', '铅笔'),
+  Word('red', '/red/', '红色'),
+  Word('blue', '/bluː/', '蓝色'),
+  Word('green', '/ɡriːn/', '绿色'),
+  Word('yellow', '/ˈjel.əʊ/', '黄色'),
+  Word('teacher', '/ˈtiː.tʃə/', '老师'),
+  Word('student', '/ˈstjuː.dənt/', '学生'),
+  Word('school', '/skuːl/', '学校'),
+  Word('classroom', '/ˈklɑːs.ruːm/', '教室'),
+  Word('friend', '/frend/', '朋友'),
+  Word('family', '/ˈfæm.əl.i/', '家庭'),
+  Word('father', '/ˈfɑː.ðə/', '父亲'),
+  Word('mother', '/ˈmʌð.ə/', '母亲'),
+  Word('brother', '/ˈbrʌð.ə/', '兄弟'),
+  Word('sister', '/ˈsɪs.tə/', '姐妹'),
+  Word('happy', '/ˈhæp.i/', '高兴的'),
+  Word('sad', '/sæd/', '伤心的'),
+  Word('big', '/bɪɡ/', '大的'),
+  Word('small', '/smɔːl/', '小的'),
+  Word('one', '/wʌn/', '一'),
+  Word('two', '/tuː/', '二'),
+  Word('three', '/θriː/', '三'),
+  Word('four', '/fɔː/', '四'),
+  Word('five', '/faɪv/', '五'),
+  Word('six', '/sɪks/', '六'),
+  Word('seven', '/ˈsev.ən/', '七'),
+  Word('eight', '/eɪt/', '八'),
+  Word('nine', '/naɪn/', '九'),
+  Word('ten', '/ten/', '十'),
+  Word('eat', '/iːt/', '吃'),
+  Word('drink', '/drɪŋk/', '喝'),
+  Word('run', '/rʌn/', '跑'),
+  Word('jump', '/dʒʌmp/', '跳'),
+  Word('sing', '/sɪŋ/', '唱歌'),
+  Word('dance', '/dɑːns/', '跳舞'),
+  Word('read', '/riːd/', '读'),
+  Word('write', '/raɪt/', '写'),
+  Word('water', '/ˈwɔː.tə/', '水'),
+  Word('milk', '/mɪlk/', '牛奶'),
+  Word('rice', '/raɪs/', '米饭'),
+  Word('egg', '/eɡ/', '鸡蛋'),
+  Word('fish', '/fɪʃ/', '鱼'),
+  Word('bird', '/bɜːd/', '鸟'),
+  Word('tree', '/triː/', '树'),
+  Word('flower', '/ˈflaʊ.ə/', '花'),
+  Word('sun', '/sʌn/', '太阳'),
+  Word('moon', '/muːn/', '月亮'),
+  Word('star', '/stɑː/', '星星'),
+  Word('hand', '/hænd/', '手'),
+  Word('foot', '/fʊt/', '脚'),
+  Word('head', '/hed/', '头'),
+  Word('eye', '/aɪ/', '眼睛'),
+  Word('ear', '/ɪə/', '耳朵'),
+  Word('nose', '/nəʊz/', '鼻子'),
+  Word('mouth', '/maʊθ/', '嘴'),
+  Word('hello', '/həˈləʊ/', '你好'),
+  Word('goodbye', '/ɡʊdˈbaɪ/', '再见'),
+  Word('yes', '/jes/', '是'),
+  Word('no', '/nəʊ/', '不'),
+  Word('open', '/ˈəʊ.pən/', '打开'),
+  Word('close', '/kləʊz/', '关闭'),
+  Word('come', '/kʌm/', '来'),
+  Word('go', '/ɡəʊ/', '去'),
+  Word('play', '/pleɪ/', '玩'),
+  Word('sleep', '/sliːp/', '睡觉'),
+  Word('morning', '/ˈmɔː.nɪŋ/', '早晨'),
+  Word('evening', '/ˈiːv.nɪŋ/', '晚上'),
+  Word('name', '/neɪm/', '名字'),
+  Word('boy', '/bɔɪ/', '男孩'),
+  Word('girl', '/ɡɜːl/', '女孩'),
+  Word('man', '/mæn/', '男人'),
+  Word('woman', '/ˈwʊm.ən/', '女人'),
+  Word('baby', '/ˈbeɪ.bi/', '婴儿'),
+  Word('car', '/kɑː/', '汽车'),
+  Word('bus', '/bʌs/', '公共汽车'),
+  Word('bike', '/baɪk/', '自行车'),
+  Word('train', '/treɪn/', '火车'),
+  Word('plane', '/pleɪn/', '飞机'),
+  Word('ball', '/bɔːl/', '球'),
+  Word('kite', '/kaɪt/', '风筝'),
+  Word('bag', '/bæɡ/', '书包'),
+  Word('box', '/bɒks/', '盒子'),
+  Word('cup', '/kʌp/', '杯子'),
+  Word('chair', '/tʃeə/', '椅子'),
+  Word('desk', '/desk/', '书桌'),
+  Word('door', '/dɔː/', '门'),
+  Word('window', '/ˈwɪn.dəʊ/', '窗户'),
+  Word('bed', '/bed/', '床'),
+  Word('room', '/ruːm/', '房间'),
+  Word('home', '/həʊm/', '家'),
+  Word('time', '/taɪm/', '时间'),
+  Word('day', '/deɪ/', '白天'),
+  Word('week', '/wiːk/', '星期'),
+  Word('year', '/jɪə/', '年'),
+];
+
+/// 词表页（Apple Music 专辑详情风格）：大封面 + 信息 + 操作按钮 + 分段 Tab + 增量加载词表
+class _WordListPage extends StatefulWidget {
+  final _WordBook book;
+  const _WordListPage({required this.book});
+
+  @override
+  State<_WordListPage> createState() => _WordListPageState();
+}
+
+class _WordListPageState extends State<_WordListPage> {
+  final TextEditingController _searchCtrl = TextEditingController();
+  final ScrollController _scrollCtrl = ScrollController();
+  final Set<String> _favorites = <String>{};
+
+  int _selectedTab = 0; // 0 单词 / 1 已收藏 / 2 相关
+  int _visibleCount = _kInitialBatch;
+  bool _isShuffled = false;
+  List<int> _shuffleOrder = const [];
+  bool _loadingMore = false;
+  bool _showUnlearnedOnly = false; // 点击副标题 chevron 后只显示未学
+  bool _isInShelf = false; // 是否已加入书架列表（未来接 SharedPreferences 持久化）
+
+  // 首屏只预备 10 个单词（iPhone 16 Pro 可视区约 8-10 行，10 个够首屏显示），
+  // 往下滑到接近底部再增量加载下一批 —— 首帧轻，push 动画不被拖垮。
+  static const int _kInitialBatch = 10;
+  static const int _kBatchSize = 20;
+
+  /// 用户已学单词数（与本词本交集）。
+  /// 实际应读取持久化的 _userLearnedWords 全集；这里 mock 一组 25 词。
+  int get _learnedCount => widget.book.words
+      .where((w) => _userLearnedWords.contains(w.text))
+      .length;
+
+  List<Word> get _orderedWords {
+    if (_isShuffled && _shuffleOrder.length == widget.book.words.length) {
+      return _shuffleOrder.map((i) => widget.book.words[i]).toList();
+    }
+    return widget.book.words;
+  }
+
+  List<Word> get _filtered {
+    List<Word> base = _orderedWords;
+    if (_selectedTab == 1) {
+      base = base.where((w) => _favorites.contains(w.text)).toList();
+    } else if (_selectedTab == 2) {
+      base = base.where((w) => !_favorites.contains(w.text)).toList();
+    }
+    // 点击副标题 chevron 后：过滤掉已学单词
+    if (_showUnlearnedOnly) {
+      base =
+          base.where((w) => !_userLearnedWords.contains(w.text)).toList();
+    }
+    final q = _searchCtrl.text.trim().toLowerCase();
+    if (q.isEmpty) return base;
+    return base
+        .where((w) => w.text.toLowerCase().contains(q))
+        .toList();
+  }
+
+  List<Word> get _displayed => _filtered.take(_visibleCount).toList();
+
+  bool get _hasMore => _displayed.length < _filtered.length;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollCtrl.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollCtrl.dispose();
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients || _loadingMore) return;
+    final pos = _scrollCtrl.position;
+    if (pos.maxScrollExtent <= 0) return;
+    if (pos.pixels >= pos.maxScrollExtent - 160 && _hasMore) {
+      if (_loadingMore) return;
+      _loadingMore = true;
+      setState(() {
+        _visibleCount = (_visibleCount + _kBatchSize).clamp(
+          0,
+          _filtered.length,
+        );
+      });
+      Future.delayed(const Duration(milliseconds: 80), () {
+        if (mounted) _loadingMore = false;
+      });
+    }
+  }
+
+  void _onSearchChanged() {
+    setState(() {
+      _visibleCount = _kInitialBatch.clamp(0, _filtered.length);
+    });
+  }
+
+  void _toggleFavorite(Word w) {
+    setState(() {
+      if (_favorites.contains(w.text)) {
+        _favorites.remove(w.text);
+      } else {
+        _favorites.add(w.text);
+      }
+      _visibleCount = _visibleCount.clamp(0, _filtered.length);
+    });
+  }
+
+  void _toggleUnlearnedOnly() {
+    setState(() {
+      _showUnlearnedOnly = !_showUnlearnedOnly;
+      _visibleCount = _kInitialBatch.clamp(0, _filtered.length);
+    });
+  }
+
+  /// 点击单词 → 触发发音（占位实现；未来接 flutter_tts 等 TTS 引擎）。
+  void _onPronounce(Word w) {
+    // TODO: integrate TTS (e.g., flutter_tts: Tts().speak(w.text))
+  }
+
+  void _startLearning() {
+    _searchCtrl.clear();
+    setState(() {
+      _selectedTab = 0;
+      _isShuffled = false;
+      _visibleCount = _kInitialBatch.clamp(0, _filtered.length);
+    });
+    _scrollCtrl.animateTo(
+      0,
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  /// 「加入书架列表」：toggle 加入/移除书架（未来持久化到 SharedPreferences）。
+  void _addToShelf() {
+    setState(() {
+      _isInShelf = !_isInShelf;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = Theme.of(context).colorScheme.onSurface;
+    final bg = isDark ? const Color(0xFF010101) : const Color(0xFFFFFFFF);
+    final surface = isDark ? const Color(0xFF1C1C1E) : Colors.white;
+    final sub = textColor.withValues(alpha: 0.5);
+    final statusHeight = MediaQuery.of(context).padding.top;
+    final gapCoverButtons = MediaQuery.of(context).size.height * 0.032;
+    // 粘性头部高度 = 状态栏 + 10(上内边距) + 38(NavBar) + 34(间距) + 128(封面) + gapCoverButtons + 32(按钮) + 14(间距) + 56(搜索框)
+    final headerHeight = statusHeight +
+        10 +
+        38 +
+        34 +
+        128 +
+        gapCoverButtons +
+        32 +
+        14 +
+        56;
+
+    final panelColor = isDark
+        ? const Color(0xFF1C1C1E).withValues(alpha: 0.75)
+        : Colors.white.withValues(alpha: 0.60);
+
+    return Scaffold(
+      backgroundColor: bg,
+      body: Stack(
+        children: [
+          // 底层：列表从 y=0 开始绘制，先留出 header 高度避免首屏被挡住
+          CustomScrollView(
+            controller: _scrollCtrl,
+            physics: const BouncingScrollPhysics(),
+            slivers: [
+              SliverToBoxAdapter(child: SizedBox(height: headerHeight)),
+              ..._buildBody(textColor: textColor, sub: sub, surface: surface),
+            ],
+          ),
+          // 顶层：固定磨砂玻璃头部（浮在列表上方，列表项会从后面滑过并被模糊）
+          // 从 y=0 起、左右贴边 → 整条（含灵动岛/状态栏区域）都是毛玻璃
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: Stack(
+              children: [
+                // 模糊层外扩 8pt，避免边缘被裁剪产生暗边/阴影
+                Positioned(
+                  top: -8,
+                  left: -8,
+                  right: -8,
+                  bottom: -8,
+                  child: BackdropFilter(
+                    filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+                    child: Container(color: Colors.transparent),
+                  ),
+                ),
+                // 可见磨砂面板：无底部边框，避免那条黑带
+                Container(
+                  color: panelColor,
+                  child: SafeArea(
+                    top: true,
+                    bottom: false,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _NavBar(textColor: textColor, isDark: isDark),
+                          const SizedBox(height: 34),
+                          _AlbumHeader(
+                            book: widget.book,
+                            isDark: isDark,
+                            textColor: textColor,
+                            sub: sub,
+                            surface: surface,
+                            favoriteCount: _favorites.length,
+                            learnedCount: _learnedCount,
+                            onToggleUnlearned: _toggleUnlearnedOnly,
+                            onStart: _startLearning,
+                            onAddToShelf: _addToShelf,
+                            isInShelf: _isInShelf,
+                          ),
+                          const SizedBox(height: 14),
+                          _SearchBar(
+                            controller: _searchCtrl,
+                            surface: surface,
+                            sub: sub,
+                            textColor: textColor,
+                            onChanged: _onSearchChanged,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildBody({
+    required Color textColor,
+    required Color sub,
+    required Color surface,
+  }) {
+    if (_selectedTab == 2) {
+      return [
+        SliverToBoxAdapter(
+          child: _RelatedPanel(
+            total: widget.book.words.length,
+            favoriteCount: _favorites.length,
+            textColor: textColor,
+            sub: sub,
+            surface: surface,
+          ),
+        ),
+      ];
+    }
+    if (_filtered.isEmpty) {
+      final msg = widget.book.words.isEmpty ? '该词本尚未导入词汇' : '未找到匹配的单词';
+      return [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 80),
+            child: Center(
+              child: Text(msg, style: TextStyle(color: sub, fontSize: 14)),
+            ),
+          ),
+        ),
+      ];
+    }
+    return [
+      SliverList(
+        delegate: SliverChildBuilderDelegate((context, i) {
+          if (i < _displayed.length) {
+            final w = _displayed[i];
+            return _WordListItem(
+              index: i,
+              word: w,
+              isLearned: _userLearnedWords.contains(w.text),
+              isFavorite: _favorites.contains(w.text),
+              onFavorite: () => _toggleFavorite(w),
+              onPronounce: _onPronounce,
+            );
+          }
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 22),
+            child: Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          );
+        }, childCount: _displayed.length + (_hasMore ? 1 : 0)),
+      ),
+    ];
+  }
+}
+
+// 顶部导航：只保留返回按钮（iOS 风细线条箭头，和底部导航图标设计语言统一）
+class _NavBar extends StatelessWidget {
+  final Color textColor;
+  final bool isDark;
+  const _NavBar({required this.textColor, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = isDark
+        ? Colors.white.withValues(alpha: 0.12)
+        : Colors.black.withValues(alpha: 0.06);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => Navigator.of(context).pop(),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Icon(
+          Icons.arrow_back_ios_new,
+          size: 18,
+          color: textColor,
+        ),
+      ),
+    );
+  }
+}
+
+// 大封面 + 标题/进度 + 操作按钮（Apple Music 专辑头部）
+class _AlbumHeader extends StatelessWidget {
+  final _WordBook book;
+  final bool isDark;
+  final Color textColor;
+  final Color sub;
+  final Color surface;
+  final int favoriteCount;
+  final int learnedCount;
+  final VoidCallback onToggleUnlearned;
+  final VoidCallback onStart;
+  final VoidCallback onAddToShelf;
+  final bool isInShelf;
+
+  const _AlbumHeader({
+    required this.book,
+    required this.isDark,
+    required this.textColor,
+    required this.sub,
+    required this.surface,
+    required this.favoriteCount,
+    required this.learnedCount,
+    required this.onToggleUnlearned,
+    required this.onStart,
+    required this.onAddToShelf,
+    required this.isInShelf,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = learnedCount >= book.words.length;
+    const accent = Color(0xFF34C759); // Apple 系统绿
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 封面：解码后淡入（不做 Hero 飞行，保证 push/pop 是纯 Apple 左右滑动）
+            Container(
+              width: 128,
+              height: 128,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(6),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: isDark ? 0.45 : 0.18),
+                    blurRadius: 10,
+                    spreadRadius: -1,
+                    offset: const Offset(0, 5),
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  color: surface,
+                  alignment: Alignment.center,
+                  child: Image.asset(
+                    book.cover,
+                    fit: BoxFit.contain,
+                    cacheWidth: 320,
+                    frameBuilder: (context, child, frame, sync) {
+                      if (sync) return child;
+                      return AnimatedOpacity(
+                        opacity: frame == null ? 0 : 1,
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOut,
+                        child: child,
+                      );
+                    },
+                    errorBuilder: (_, _, _) => Container(color: surface),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    book.title,
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      color: textColor,
+                      letterSpacing: -0.3,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 8),
+// 进度行：>= 总词数 → 绿色 100/100 + 无 chevron；
+  //             < 总词数 → X/100 + chevron，点击切换"只显示未学"
+  if (completed)
+                    Text(
+                      '100/100',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: accent,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.1,
+                      ),
+                    )
+                  else
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: onToggleUnlearned,
+                      child: Row(
+                        children: [
+                          Text(
+                            '$learnedCount / 100',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: sub,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(width: 2),
+                          Icon(Icons.chevron_right, size: 14, color: sub),
+                        ],
+                      ),
+                    ),
+                    // 已学 X/100 + chevron 触发"只显示未学"
+                  const SizedBox(height: 6),
+                  Text(
+                    '本书 ${book.words.length} 词',
+                    style: TextStyle(fontSize: 13, color: sub),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        SizedBox(height: MediaQuery.of(context).size.height * 0.032),
+        // 不加 AnimatedSize：点「加入/已加入」时左按钮原地切换文案，
+        // 「开始背诵」位置固定不动（无推动动画）
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 未加入 / 已加入：外框颜色不变，只换图标和文案
+            _ActionButton(
+              label: isInShelf ? '已加入书架列表' : '加入书架列表',
+              icon: isInShelf
+                  ? Text('✓',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        height: 1,
+                        color: textColor,
+                      ))
+                  : Icon(Icons.bookmark_add_outlined,
+                      size: 14, color: textColor),
+              primary: false,
+              onTap: onAddToShelf,
+            ),
+            const SizedBox(width: 10),
+            _ActionButton(
+              label: '开始背诵',
+              icon: Icon(Icons.play_arrow, size: 14, color: textColor),
+              primary: false,
+              onTap: onStart,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+// 描边胶囊按钮：primary 蓝色描边 + 浅蓝填充 / 灰色描边（按压缩放弹簧回弹）
+// icon 改为 Widget，方便复用底部导航栏同款字形（如 ✓）
+class _ActionButton extends StatefulWidget {
+  final String label;
+  final Widget icon;
+  final bool primary;
+  final VoidCallback onTap;
+
+  const _ActionButton({
+    required this.label,
+    required this.icon,
+    required this.primary,
+    required this.onTap,
+  });
+
+  @override
+  State<_ActionButton> createState() => _ActionButtonState();
+}
+
+class _ActionButtonState extends State<_ActionButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    value: 1,
+  );
+
+  // 弹簧参数：质量 1、刚度 500、阻尼 26（按压缩放快速回弹、轻微过冲）
+  static const SpringDescription _spring = SpringDescription(
+    mass: 1,
+    stiffness: 500,
+    damping: 26,
+  );
+
+  void _down(_) =>
+      _ctrl.animateWith(SpringSimulation(_spring, _ctrl.value, 0.96, 0));
+
+  void _up(_) =>
+      _ctrl.animateWith(SpringSimulation(_spring, _ctrl.value, 1, 0));
+
+  void _cancel() =>
+      _ctrl.animateWith(SpringSimulation(_spring, _ctrl.value, 1, 0));
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    const primary = Color(0xFF007AFF);
+    final border = widget.primary
+        ? primary
+        : (isDark
+            ? Colors.white.withValues(alpha: 0.16)
+            : Colors.black.withValues(alpha: 0.12));
+    final fg = widget.primary
+        ? primary
+        : Theme.of(context).colorScheme.onSurface;
+    final fill = widget.primary
+        ? primary.withValues(alpha: 0.08)
+        : Colors.transparent;
+    return GestureDetector(
+      onTapDown: _down,
+      onTapUp: _up,
+      onTapCancel: _cancel,
+      // 用 onTap 触发回调：只要识别为 tap 即触发，比依赖 onTapUp 更可靠
+      // （手指轻微滑动时 onTapUp 不会触发，但 onTap 仍会）。
+      onTap: widget.onTap,
+      behavior: HitTestBehavior.opaque,
+      child: ScaleTransition(
+        scale: _ctrl,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeOutQuint,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+          decoration: BoxDecoration(
+            color: fill,
+            border: Border.all(color: border, width: 1.0),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              widget.icon,
+              const SizedBox(width: 5),
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: fg,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// 搜索框：描边胶囊设计（与「开始背诵」按钮一致），仅搜索单词
+class _SearchBar extends StatelessWidget {
+  final TextEditingController controller;
+  final Color surface;
+  final Color sub;
+  final Color textColor;
+  final VoidCallback onChanged;
+
+  const _SearchBar({
+    required this.controller,
+    required this.surface,
+    required this.sub,
+    required this.textColor,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final border = isDark
+        ? Colors.white.withValues(alpha: 0.16)
+        : Colors.black.withValues(alpha: 0.12);
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 10),
+      child: Container(
+        height: 36,
+        decoration: BoxDecoration(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: border, width: 1.0),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            const SizedBox(width: 12),
+            Icon(
+              Icons.search,
+              color: sub,
+              size: 16,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: controller,
+                onChanged: (_) => onChanged(),
+                textAlignVertical: TextAlignVertical.center,
+                style: TextStyle(
+                  color: textColor,
+                  fontSize: 14,
+                  height: 1,
+                ),
+                decoration: InputDecoration(
+                  hintText: '搜索单词',
+                  hintStyle: TextStyle(color: sub, fontSize: 14, height: 1),
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.zero,
+                  isCollapsed: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// 单词行：序号 + 单词/音标 + 释义 + 未学徽章 + 收藏星标（入场上浮淡入）
+// 点击行 → 发音（onPronounce，占位）；点击收藏图标 → 切换收藏
+class _WordListItem extends StatelessWidget {
+  final int index;
+  final Word word;
+  final bool isLearned;
+  final bool isFavorite;
+  final VoidCallback onFavorite;
+  final ValueChanged<Word> onPronounce;
+
+  const _WordListItem({
+    required this.index,
+    required this.word,
+    required this.isLearned,
+    required this.isFavorite,
+    required this.onFavorite,
+    required this.onPronounce,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final textColor = Theme.of(context).colorScheme.onSurface;
+    final sub = textColor.withValues(alpha: 0.5);
+    final divider = Theme.of(context).brightness == Brightness.dark
+        ? Colors.white.withValues(alpha: 0.06)
+        : Colors.black.withValues(alpha: 0.06);
+    // 未背诵单词显示红色「未」标签
+    final showE = !isLearned;
+    const eColor = Color(0xFFB50000);
+    // 只给首屏前 12 行做淡入动画（避免 30 行同时动画在 web 掉帧），
+    // 增量加载/滚动复用的行直接显示，保证滚动流畅。
+    final animateIn = index < 12;
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('w_${word.text}'),
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+      tween: Tween(begin: animateIn ? 0 : 1, end: 1),
+      builder: (context, v, child) => Opacity(
+        opacity: v,
+        child: Transform.translate(
+          offset: Offset(0, (1 - v) * 8),
+          child: child,
+        ),
+      ),
+      child: InkWell(
+        onTap: () => onPronounce(word),
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: divider, width: 0.5),
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 26,
+                child: Text(
+                  '${index + 1}',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: sub,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      word.text,
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                        color: textColor,
+                        letterSpacing: -0.3,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${word.phonetic} · ${word.meaning}',
+                      style: TextStyle(fontSize: 13, color: sub),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              if (showE) ...[
+                Container(
+                  padding: const EdgeInsets.all(3),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: eColor, width: 1),
+                  ),
+                  child: const Text(
+                    '未',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: eColor,
+                      height: 1,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+              _FavoriteButton(isFavorite: isFavorite, onTap: onFavorite),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// 收藏星标：切换时弹簧回弹
+class _FavoriteButton extends StatefulWidget {
+  final bool isFavorite;
+  final VoidCallback onTap;
+
+  const _FavoriteButton({required this.isFavorite, required this.onTap});
+
+  @override
+  State<_FavoriteButton> createState() => _FavoriteButtonState();
+}
+
+class _FavoriteButtonState extends State<_FavoriteButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    value: 1,
+  );
+
+  // 弹簧参数：质量 1、刚度 500、阻尼 26（星标弹出 1.3x 后回落）
+  static const SpringDescription _spring = SpringDescription(
+    mass: 1,
+    stiffness: 500,
+    damping: 26,
+  );
+
+  @override
+  void didUpdateWidget(covariant _FavoriteButton old) {
+    super.didUpdateWidget(old);
+    if (old.isFavorite != widget.isFavorite) {
+      _ctrl.animateWith(SpringSimulation(_spring, _ctrl.value, 1.3, 0));
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    final sub = Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.3);
+    return GestureDetector(
+      onTap: widget.onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (context, child) =>
+            Transform.scale(scale: _ctrl.value, child: child),
+        child: Icon(
+          widget.isFavorite ? Icons.star_rounded : Icons.star_outline_rounded,
+          color: widget.isFavorite ? primary : sub,
+          size: 22,
+        ),
+      ),
+    );
+  }
+}
+
+// 相关页：学习进度环 + 统计卡
+class _RelatedPanel extends StatelessWidget {
+  final int total;
+  final int favoriteCount;
+  final Color textColor;
+  final Color sub;
+  final Color surface;
+
+  const _RelatedPanel({
+    required this.total,
+    required this.favoriteCount,
+    required this.textColor,
+    required this.sub,
+    required this.surface,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    final pct = total == 0 ? 0.0 : favoriteCount / total;
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: surface,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            padding: const EdgeInsets.all(20),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 64,
+                  height: 64,
+                  child: CircularProgressIndicator(
+                    value: pct,
+                    strokeWidth: 7,
+                    strokeCap: StrokeCap.round,
+                    backgroundColor:
+                        Theme.of(context).brightness == Brightness.dark
+                        ? const Color(0xFF3A3A3C)
+                        : const Color(0xFFE5E5EA),
+                    valueColor: AlwaysStoppedAnimation(primary),
+                  ),
+                ),
+                const SizedBox(width: 20),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '学习进度',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: textColor,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '已收藏 $favoriteCount / $total 个',
+                        style: TextStyle(fontSize: 14, color: sub),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '掌握度 ${(pct * 100).toStringAsFixed(0)}%',
+                        style: TextStyle(fontSize: 13, color: sub),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          _StatRow(
+            label: '总词数',
+            value: '$total',
+            surface: surface,
+            textColor: textColor,
+            sub: sub,
+          ),
+          const SizedBox(height: 10),
+          _StatRow(
+            label: '已收藏',
+            value: '$favoriteCount',
+            surface: surface,
+            textColor: textColor,
+            sub: sub,
+          ),
+          const SizedBox(height: 10),
+          _StatRow(
+            label: '难度',
+            value: '入门',
+            surface: surface,
+            textColor: textColor,
+            sub: sub,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color surface;
+  final Color textColor;
+  final Color sub;
+
+  const _StatRow({
+    required this.label,
+    required this.value,
+    required this.surface,
+    required this.textColor,
+    required this.sub,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: surface,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 15, color: sub)),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: textColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
