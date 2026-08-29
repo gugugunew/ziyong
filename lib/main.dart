@@ -1200,62 +1200,47 @@ class _CategoryBookCover extends StatelessWidget {
             opacity: identical(flying, book) ? 0.0 : 1.0,
             child: child,
           ),
-          child: Stack(
-          alignment: Alignment.bottomCenter,
-          children: [
-            // 底部书影： screenshot 风格的柔和矩形阴影
-            Positioned(
-              bottom: -2,
-              left: 4,
-              right: 4,
-              child: Container(
-                height: 6,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(4),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.20),
-                      blurRadius: 18,
-                      spreadRadius: 4,
-                      offset: const Offset(0, 10),
-                    ),
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.10),
-                      blurRadius: 8,
-                      spreadRadius: 1,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // 书封图片：完整显示上传的原图。打开时由路由的「飞行层」（非 Hero）从
-            // 此位置起飞，圆角 12 → 详情页 20 平滑插值，达成规格「共享元素 + 圆角过渡」。
-            ClipRRect(
+          // 书封图片 + Apple Books 风格下阴影：直接把阴影画在书的圆角容器上，
+          // 而不是单独加一个扁阴影层，这样形状更自然、更贴近 iPhone 观感。
+          child: Container(
+            width: _CategoryCardsSection._cardW,
+            height: _CategoryCardsSection._cardH,
+            decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
-              child: Container(
-                width: _CategoryCardsSection._cardW,
-                height: _CategoryCardsSection._cardH,
-                color: Theme.of(context).brightness == Brightness.dark
-                    ? const Color(0xFF1C1C1E)
-                    : const Color(0xFFF2F2F7),
-                child: Image.asset(
-                  book.cover,
-                  fit: BoxFit.contain,
-                  cacheWidth: 320,
-                  frameBuilder: (context, child, frame, sync) {
-                    if (sync) return child;
-                    return AnimatedOpacity(
-                      opacity: frame == null ? 0 : 1,
-                      duration: const Duration(milliseconds: 200),
-                      curve: Curves.easeOut,
-                      child: child,
-                    );
-                  },
+              boxShadow: [
+                // Apple Books 风格：极淡、极柔、范围大的环境阴影，
+                // 让书像浮在白色桌面上，而不是底部一条黑边。
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.07),
+                  blurRadius: 48,
+                  spreadRadius: -6,
+                  offset: const Offset(0, 22),
                 ),
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.04),
+                  blurRadius: 26,
+                  spreadRadius: -4,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.asset(
+                book.cover,
+                fit: BoxFit.contain,
+                cacheWidth: 320,
+                frameBuilder: (context, child, frame, sync) {
+                  if (sync) return child;
+                  return AnimatedOpacity(
+                    opacity: frame == null ? 0 : 1,
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOut,
+                    child: child,
+                  );
+                },
               ),
             ),
-          ],
           ),
         ),
       ),
@@ -1270,9 +1255,43 @@ class _CategoryBookCover extends StatelessWidget {
 /// 与 Apple「先小、后绽开」的观感完全相反（就是之前"太宽了"的根因）。
 ///
 /// 同理，几何进度算出来之后**不要再叠一层 easeOutCubic**：
-/// easeOutCubic 自己也是前置的（t=0.5 就走完 87.5%），叠上去等于前置两次。
-/// 这里用一条平滑对称的 easeInOut 当唯一的几何时钟，尺寸再线性跟随它。
-const Curve _kOpenCurve = Curves.easeInOut;
+/// 几何只用一条曲线当「时钟」，尺寸线性跟随它（不再叠加第二层前置曲线）。
+/// 这条曲线直接按用户逐帧实测数据拟合（见 _MeasuredOpenCurve）。
+const Curve _kOpenCurve = _MeasuredOpenCurve();
+
+/// 打开动画进度曲线：严格按用户逐帧实测数据拟合。
+/// 数据来自 iPhone 16 Pro 录屏（00:01.51 → 00:01.91，满屏 0.40s）：
+/// 卡片宽 140 → 349 线性映射为 pw = (w−140)/209，记录 pw 随时间的轨迹。
+/// _tau 是**归一化动画进度**(0..1)，满屏(pw=1.0)落在 τ=0.74。
+/// 真实总时长由 kOpenDurationMs 决定，改它只是整体拉伸时间、不改变曲线形状。
+class _MeasuredOpenCurve extends Curve {
+  const _MeasuredOpenCurve();
+
+  // τ = 归一化动画进度(0..1)，由 _tau 表直接给出
+  static const List<double> _tau = <double>[
+    0.00, 0.08, 0.12, 0.16, 0.18, 0.22, 0.24, 0.28, 0.32, 0.36,
+    0.40, 0.42, 0.46, 0.48, 0.56, 0.58, 0.62, 0.66, 0.70, 0.74,
+  ];
+  static const List<double> _pw = <double>[
+    0.000, 0.225, 0.325, 0.450, 0.545, 0.637, 0.704, 0.767, 0.851, 0.880,
+    0.890, 0.928, 0.942, 0.957, 0.971, 0.976, 0.986, 0.990, 0.990, 1.000,
+  ];
+
+  @override
+  double transform(double t) {
+    if (t <= 0.0) return 0.0;
+    if (t >= 0.74) return 1.0;
+    for (int i = 0; i < _tau.length - 1; i++) {
+      final t0 = _tau[i];
+      final t1 = _tau[i + 1];
+      if (t >= t0 && t <= t1) {
+        final f = (t - t0) / (t1 - t0);
+        return _pw[i] + (_pw[i + 1] - _pw[i]) * f;
+      }
+    }
+    return 1.0;
+  }
+}
 
 /// 「复制的图片」出现的**宽度进度**（Apple Music 120Hz 逐帧实测）：
 /// 卡片宽 208 那一帧复制图首次出现 → pw = (208-140)/(349-140) ≈ 0.3254。
@@ -1295,32 +1314,46 @@ const List<double> kCardHeightPhAnchors = <double>[
   0.0000, 0.0637, 0.1273, 0.1910, 0.2524, 0.3106, 0.3612, 0.4098, 0.4651,
   0.5228, 0.5827, 0.6465, 0.7161, 0.7734, 0.8366, 0.9136, 1.0000,
 ];
-/// 卡片透明度的锚点（全部由曲线自然穿过，不是在某个点硬改数值 → 不会跳变）：
-///   起点 0.25  →  复制图出现(0.3254) 0.50  →  pw=0.80 那点 0.93  →  满屏 1.0
-const double kCardOpacityStart = 0.25;
-const double kCardOpacityAtTrigger = 0.50;
-/// 接近满屏那一帧：基本不透明了但还没到 100%（复制图同一套透明度，值一样）。
-const double kCardOpacityNearEnd = 0.93;
-/// 0.93 对应的**宽度进度**（卡片 ≈ 300/349 ≈ 屏宽 86%）。
-const double kNearEndWidthProgress = 0.80;
+/// 卡片透明度：直接跟随卡片宽度进度（pw = g）。
+///   起点 kCardOpacityStart（卡片宽140）→ 满屏(pw=1,卡片宽349) 1.0，线性映射，
+///   与卡片宽曲线同一时钟、同形（前段随卡片宽暴涨）。满屏必为 1.0（实底）。
+const double kCardOpacityStart = 0.85;
+
+/// 透明度前导斜坡：开场 0→kCardOpacityRampMs 毫秒内，透明度从
+/// kCardOpacityRampStart 快速升到 kCardOpacityRampEnd（=kCardOpacityStart），
+/// 之后继续走上面的「跟随卡片宽度」映射。
+const double kCardOpacityRampStart = 0.20;
+const double kCardOpacityRampMs = 50.0;
 
 /// 原图（被点那张封面）的「抬起 + 缩小退场」——Apple Music 120Hz 逐帧实测：
-/// 静态宽 140 → 抬起峰值 145（×1.0357），向上垂直位移 25px（= 0.1786 × 图高），
-/// 峰值在 pw=0.225（卡片 187）时达到并保持，随后按 (1-t)^0.4254 缩小
-/// （实测 140→130→117→102），pw=0.636 最后可测、pw=0.703 不可见。
+/// 静态宽 140 → 抬起峰值 145（×1.0357），向上垂直位移 25px（= 0.1786 × 图高）。
+/// 展开段（卡片一出现的那一刻）原图就钉在卡片左上角，从峰值开始随卡片宽进度 g
+/// 平稳持续缩小，到 kSrcGoneProgress（原图不可见）时收到 0，与淡出同节奏收尾。
 const double kSrcLiftPeakScale = 1.0357;
 const double kSrcLiftShiftY = 0.1786;
-const double kSrcPeakProgress = 0.225;
-const double kSrcShrinkPow = 0.4254;
-/// 原图完全不可见的宽度进度（实测 pw=0.703，卡片 287）。
+// 缩小曲线指数：1.0 = 线性（匀速慢慢缩）；>1 早期更慢、收尾更快（更"舒缓"）。
+const double kSrcShrinkPow = 1.0;
+/// 原图尺寸缩小 / 复制图交叠窗口收尾的宽度进度（实测 pw=0.703，卡片 287）。
+/// 注意：透明度比它更早归零（见 kSrcFadeEnd），尺寸与复制图仍收到这里。
 const double kSrcGoneProgress = 0.703;
+/// 原图透明度归零（完全透明）对应的卡片宽进度：用户指定 原图 到 00:01.62
+/// （卡273，pw=0.636）即完全透明——比尺寸/复制图终点更早收尾。
+const double kSrcFadeEnd = 0.636;
+/// 原图淡出缓动指数：>1 = 前期更实（慢）、临近终点才快速变透（「卡片越大越透、慢慢变淡」）。
+/// 2.0 ≈ 二次 ease-in；越大前期越实、收尾越陡。
+const double kSrcFadePow = 2.0;
 
 /// 动画时长（毫秒）。
 ///
 /// Apple 120Hz 实测：从点击（1.51s）到视觉上展开到位（1.91s）≈ 0.4s。
 /// 返回动画一般比打开快，按 0.7 倍取 280ms。
-const int kOpenDurationMs = 400;
-const int kCloseDurationMs = 280;
+// ⚠️ 测试减速中：原「当前速度」= 500ms，用户验证完说「恢复到现在的速度」即改回 500。
+const int kOpenDurationMs = 500;
+const int kCloseDurationMs = 500;
+/// 抬升阶段时长（真实毫秒）：封面先从网格原位抬起/放大，之后卡片才展开。
+/// 抬升段时长 = iPhone 录屏实测「抬起」帧：00:01.51→00:01.53 = 20ms（与总时长 400ms 解耦，单独定）。
+/// 可单独调，不影响曲线形状。
+const double kLiftDurationMs = 20.0;
 
 /// 锚点表线性插值：`anchors[i]` 对应进度 `i / (n-1)`，x ∈ [0,1]。
 double _lerpAnchors(List<double> anchors, double x) {
@@ -1386,8 +1419,6 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    final geo = CurvedAnimation(parent: animation, curve: _kOpenCurve);
-
     // 关键：用 LayoutBuilder 拿**真实布局尺寸**，不要用 MediaQuery.of(context).size。
     // iPhone 外壳下 MaterialApp 继承的 MediaQuery 可能是整个浏览器窗口的尺寸，
     // 用它当满屏尺寸会让 100% 时的卡片比可见区域大得多 → 直接飞到屏幕外面，
@@ -1406,28 +1437,24 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
         final fadeStart = (triggerG - kCopyFadeLead).clamp(0.0, 1.0);
         final fadeSpan = (kSrcGoneProgress - fadeStart).clamp(0.05, 1.0);
 
-        // 原图缩放曲线（g 的函数）：
-        //   抬起段 [0, 0.225] easeOut 1.0→1.0357；缩小段 [0.225, 1] (1-t)^0.4254 → 0
-        //   （缩小段自然延伸到 g=1 归零，「不可见」由交叠淡出系数负责提前压掉）。
-        double srcScaleAt(double gg) {
-          if (gg <= kSrcPeakProgress) {
-            final t = (gg / kSrcPeakProgress).clamp(0.0, 1.0);
-            return 1.0 +
-                (kSrcLiftPeakScale - 1.0) * Curves.easeOut.transform(t);
-          }
-          final t = ((gg - kSrcPeakProgress) / (1.0 - kSrcPeakProgress))
-              .clamp(0.0, 1.0);
-          return kSrcLiftPeakScale *
-              math.pow(1.0 - t, kSrcShrinkPow).toDouble();
-        }
-
         return AnimatedBuilder(
-          animation: geo,
+          animation: animation,
           builder: (context, _) {
-            final g = geo.value;
+            // ---------- 时间轴：抬升段 → 展开段（两段共用一个控制器）----------
+            // tMs       = 真实毫秒（随 animation.value 线性 0→1）
+            // liftRaw   = 抬升进度 0→1（0→kLiftDurationMs）
+            // expRaw    = 展开进度 0→1（kLiftDurationMs→结束），再经 _kOpenCurve 塑形得 g
+            final tMs = animation.value * kOpenDurationMs;
+            final liftRaw = (tMs / kLiftDurationMs).clamp(0.0, 1.0);
+            final liftEase = Curves.easeOut.transform(liftRaw);
+            final expRaw = (((tMs - kLiftDurationMs) /
+                        (kOpenDurationMs - kLiftDurationMs)))
+                    .clamp(0.0, 1.0);
+            final g = _kOpenCurve.transform(expRaw);
+
             // 动画结束后直接把页面本体交出去：
             // 省掉 BackdropFilter 模糊层，否则列表滚动时一直挂着全屏模糊，掉帧。
-            if (g >= 1.0) return child;
+            if (g >= 1.0 && liftRaw >= 1.0) return child;
 
             final isDark = Theme.of(context).brightness == Brightness.dark;
             final surface = isDark ? const Color(0xFF1C1C1E) : Colors.white;
@@ -1436,52 +1463,39 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                 ? const Color(0xFF000000).withValues(alpha: 0.30)
                 : Colors.white.withValues(alpha: 0.35);
 
+            // 抬起位移量（与 Apple 实测一致：上移 25px）
+            final liftY = kSrcLiftShiftY * originRect.height;
+
             // ---------- ① 卡片几何：源卡片 → 满屏 ----------
-            // 起点就是被点那张卡片本身（位置/宽高一致），终点满屏。
+            // 起点（g=0）已带抬起偏移：卡片左上角 = 抬起后的封面左上角，
+            // 这样「抬升段结束」与「展开段开始」同一位置，过渡无缝。
             // 宽进度 pw = g 线性；高进度 ph 按 Apple 实测锚点表插值
             // （高度进度落后于宽度进度 → 先变宽、再变高）。全程连续，绝不跳变。
             final pw = g;
             final ph = _lerpAnchors(kCardHeightPhAnchors, pw);
             final cardRect = Rect.fromLTWH(
               originRect.left * (1 - pw),
-              originRect.top * (1 - pw),
+              (originRect.top - liftY) * (1 - pw),
               originRect.width + (size.width - originRect.width) * pw,
               originRect.height + (size.height - originRect.height) * ph,
             );
 
-            // ---------- ② 卡片透明度：四个锚点，两段幂曲线 ----------
-            //   起点 0.25 → 复制图出现(0.3254) 0.50 → pw=0.80 那点 0.93 → 满屏 1.0
-            // 四个锚点用**两段幂曲线**连起来（在触发点处首尾相接），
-            // 全部是曲线自然穿过，不是在某个点硬赋值，所以不会跳变。
-            // 归一化：cardOpacity = kStart + (1-kStart) * fill
-            final firstFill = (((kCardOpacityAtTrigger - kCardOpacityStart) /
-                    (1.0 - kCardOpacityStart))
-                .clamp(0.01, 0.99));
-            final nearFill = (((kCardOpacityNearEnd - kCardOpacityStart) /
-                    (1.0 - kCardOpacityStart))
-                .clamp(0.01, 0.99));
-            // 第一段 [0, triggerG]：fill = firstFill * (g/triggerG)^pA
-            final pA =
-                (math.log(firstFill) / math.log(triggerG)).clamp(0.15, 6.0);
-            // 第二段 [triggerG, 1]：fill = firstFill + (1-firstFill) * b^pB
-            //   强制穿过 (kNearEndWidthProgress, nearFill)
-            final bNear = (((kNearEndWidthProgress - triggerG) /
-                    (1.0 - triggerG))
-                .clamp(0.01, 0.99));
-            final segTarget =
-                (((nearFill - firstFill) / (1.0 - firstFill)).clamp(0.01, 0.99));
-            final pB = (math.log(segTarget) / math.log(bNear)).clamp(0.15, 6.0);
-
-            final double fill;
-            if (g <= triggerG) {
-              fill = firstFill * math.pow(g / triggerG, pA).toDouble();
+            // ---------- ② 卡片透明度 ----------
+            // 抬升段(0→kLiftDurationMs)卡片完全透明，只有封面在动；
+            // 展开段才进入透明度斜坡。expMs = 展开段真实毫秒。
+            final expMs = (tMs - kLiftDurationMs).clamp(0.0, double.infinity);
+            final double cardOpacityRaw;
+            if (liftRaw < 1.0) {
+              cardOpacityRaw = 0.0;
+            } else if (expMs <= kCardOpacityRampMs) {
+              cardOpacityRaw = kCardOpacityRampStart +
+                  (kCardOpacityStart - kCardOpacityRampStart) *
+                      (expMs / kCardOpacityRampMs);
             } else {
-              final b = ((g - triggerG) / (1.0 - triggerG)).clamp(0.0, 1.0);
-              fill = firstFill + (1.0 - firstFill) * math.pow(b, pB).toDouble();
+              cardOpacityRaw =
+                  kCardOpacityStart + (1.0 - kCardOpacityStart) * g;
             }
-            final cardOpacity =
-                (kCardOpacityStart + (1.0 - kCardOpacityStart) * fill)
-                    .clamp(0.0, 1.0);
+            final cardOpacity = cardOpacityRaw.clamp(0.0, 1.0);
 
             // 圆角矩形：前 75% 保持 22，最后 25% 才收方（全程都是圆角矩形）
             final radiusT = ((g - 0.75) / 0.25).clamp(0.0, 1.0);
@@ -1497,25 +1511,29 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             //   u=1     原图完全归零（pw = 0.703，卡片 ≈ 屏宽 82%），复制图完全接管
             final u = ((g - fadeStart) / fadeSpan).clamp(0.0, 1.0);
             final copyFade = u;
-            // 原图与复制图互补：u<0.5 时原图更实，u>0.5 后复制图接管。
-            final srcFade = 1.0 - u;
+            // 原图透明度 = 卡片宽进度的反函数（用户指定）：卡片越小原图越实，卡片越大越透。
+            // srcFade = 1 - (g / kSrcFadeEnd)^kSrcFadePow：
+            //   g=0（卡140，00:01.51）→ 1.0（最实）；卡片越大越透；
+            //   g = kSrcFadeEnd（卡273，00:01.62）→ 0.0（完全透明，此后再不可见）。
+            // 缓动指数 >1：前期更实、临近终点才快速变透（「慢慢变淡」）。
+            // 与复制图 u 时钟解耦——不再共用（那样会让原图跟复制图同步淡入淡出）。
+            final srcFade = (1.0 -
+                    math.pow(g / kSrcFadeEnd, kSrcFadePow).toDouble())
+                .clamp(0.0, 1.0);
 
-            // ---------- ④ 原图：钉在卡片左上角 + 抬起 + 缩小退场 ----------
-            // Apple 实测：点击瞬间向上垂直位移 25px 并微微放大（峰值 ×1.0357），
-            // 峰值在 pw=0.225（卡片 187）时达到，随后按 (1-t)^0.4254 缩小，
-            // 左上角始终钉在卡片左上角。全程连续，无跳变。
-            final srcScale = srcScaleAt(g);
-            // 抬起过程中向上平移（抬起完成后保持住，随缩小段一起退场）
-            final liftAmount = Curves.easeOut
-                .transform((g / kSrcPeakProgress).clamp(0.0, 1.0));
-            final srcDy = -kSrcLiftShiftY * originRect.height * liftAmount;
-
-            final srcRect = Rect.fromLTWH(
-              cardRect.left,
-              cardRect.top + srcDy,
-              originRect.width,
-              originRect.height,
-            );
+            // ---------- ④ 原图缩放（同一张封面贯穿抬升+展开）----------
+            // 抬升段：随 liftEase 从 1.0 放大到峰值 ×1.0357；
+            // 展开段（卡片一出来的那一刻起）：钉在卡片左上角，从峰值开始
+            // 随卡片宽进度 g 平稳持续缩小，到 kSrcGoneProgress 收到 0（尺寸比透明度收尾更晚）。
+            // 不再"先保持峰值再骤缩"。
+            final double srcScale;
+            if (liftRaw < 1.0) {
+              srcScale = 1.0 + (kSrcLiftPeakScale - 1.0) * liftEase;
+            } else {
+              final t = (g / kSrcGoneProgress).clamp(0.0, 1.0);
+              srcScale = kSrcLiftPeakScale *
+                  math.pow(1.0 - t, kSrcShrinkPow).toDouble();
+            }
 
             // 旧首页压暗/模糊：与卡片透明度同步渐强
             final dimOpacity = cardOpacity;
@@ -1565,48 +1583,63 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                             ),
                           ],
                         ),
-                        child: Opacity(
-                          opacity: copyFade,
-                          child: OverflowBox(
-                            alignment: Alignment.topLeft,
-                            minWidth: size.width,
-                            maxWidth: size.width,
-                            minHeight: size.height,
-                            maxHeight: size.height,
-                            child: Transform.scale(
-                              scale: s,
-                              alignment: Alignment.topLeft,
-                              child: child,
+                        child: Stack(
+                          children: [
+                            // 复制图：缩小版整页，铺满卡片（左钉）
+                            Positioned.fill(
+                              child: Opacity(
+                                opacity: copyFade,
+                                child: OverflowBox(
+                                  alignment: Alignment.topLeft,
+                                  minWidth: size.width,
+                                  maxWidth: size.width,
+                                  minHeight: size.height,
+                                  maxHeight: size.height,
+                                  child: Transform.scale(
+                                    scale: s,
+                                    alignment: Alignment.topLeft,
+                                    child: child,
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
+                          ],
                         ),
                       ),
                     ),
                   ),
                 ),
 
-                // 3) 原图：钉在卡片左上角（不飞），但会**抬起 + 缩小退场**：
-                //    点击瞬间上移一小段并微微放大，随后一边缩到 kSrcEndScale 一边淡出。
-                //    用 Transform.scale(topLeft) 保证左上角始终钉在卡片左上角。
-                //    透明度 = 卡片透明度 × 淡出系数，与外框同步变实/变虚。
+                // 3) 原图（封面）：贯穿「抬升→展开」的同一张，作为卡片兄弟层、独立透明度。
+                //    - 抬升段：钉在网格原位、向上位移 liftY*liftEase、放大到峰值，受自身圆角裁切。
+                //    - 展开段：钉在卡片左上角（卡片自身已含抬起偏移，故不再额外位移）、
+                //      随卡片圆角裁切 → 不会飞出卡片。
+                //    透明度只用 srcFade（不被 cardOpacity 压低），所以两阶段衔接处不跳变。
                 Positioned(
-                  left: srcRect.left,
-                  top: srcRect.top,
-                  width: srcRect.width,
-                  height: srcRect.height,
-                  child: IgnorePointer(
-                    child: Opacity(
-                      opacity: (cardOpacity * srcFade).clamp(0.0, 1.0),
-                      child: Transform.scale(
-                        scale: srcScale,
-                        alignment: Alignment.topLeft,
-                        child: _coverBoxWidget(
-                          book: book,
-                          surface: surface,
-                          isDark: isDark,
-                          width: srcRect.width,
-                          height: srcRect.height,
-                          radius: 12.0,
+                  left: liftRaw < 1.0 ? originRect.left : cardRect.left,
+                  top: liftRaw < 1.0
+                      ? originRect.top - liftY * liftEase
+                      : cardRect.top,
+                  width: liftRaw < 1.0 ? originRect.width : cardRect.width,
+                  height: liftRaw < 1.0 ? originRect.height : cardRect.height,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(
+                      liftRaw < 1.0 ? 12.0 : cardRadius,
+                    ),
+                    child: IgnorePointer(
+                      child: Opacity(
+                        opacity: srcFade,
+                        child: Transform.scale(
+                          scale: srcScale,
+                          alignment: Alignment.topLeft,
+                          child: _coverBoxWidget(
+                            book: book,
+                            surface: surface,
+                            isDark: isDark,
+                            width: originRect.width,
+                            height: originRect.height,
+                            radius: 12.0,
+                          ),
                         ),
                       ),
                     ),
@@ -3066,24 +3099,25 @@ Widget _coverBoxWidget({
     decoration: BoxDecoration(
       borderRadius: BorderRadius.circular(radius),
       boxShadow: [
+        // 与网格页统一：大面积、极淡、极柔的 Apple Books 风格浮起阴影。
         BoxShadow(
-          color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.16),
-          blurRadius: 18,
-          spreadRadius: 0,
-          offset: const Offset(0, 9),
+          color: Colors.black.withValues(alpha: isDark ? 0.22 : 0.09),
+          blurRadius: 46,
+          spreadRadius: -6,
+          offset: const Offset(0, 22),
         ),
         BoxShadow(
-          color: Colors.black.withValues(alpha: isDark ? 0.20 : 0.08),
-          blurRadius: 6,
-          spreadRadius: -1,
-          offset: const Offset(0, 4),
+          color: Colors.black.withValues(alpha: isDark ? 0.12 : 0.05),
+          blurRadius: 24,
+          spreadRadius: -4,
+          offset: const Offset(0, 12),
         ),
       ],
     ),
     child: ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: Container(
-        color: surface,
+        color: Colors.transparent,
         alignment: Alignment.center,
         child: Image.asset(
           book.cover,
@@ -3098,7 +3132,7 @@ Widget _coverBoxWidget({
               child: child,
             );
           },
-          errorBuilder: (_, _, _) => Container(color: surface),
+          errorBuilder: (_, _, _) => const ColoredBox(color: Colors.transparent),
         ),
       ),
     ),
