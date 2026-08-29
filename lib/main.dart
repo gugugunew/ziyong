@@ -1261,10 +1261,14 @@ class _CategoryBookCover extends StatelessWidget {
 /// 这里用一条平滑对称的 easeInOut 当唯一的几何时钟，尺寸再线性跟随它。
 const Curve _kOpenCurve = Curves.easeInOut;
 
-/// 「复制的图片」浮现时机：
-/// 当「原图宽度 = 卡片宽度的 2/3」时出现，即卡片宽度 = 原图宽度的 1.5 倍。
-/// 写成相对于源卡片的倍数，换源卡片比例也能自适应。
-const double kCopyTriggerOriginMultiplier = 1.5;
+/// 「复制的图片」出现时机（Apple 实测）：触发那一刻
+/// **原图当前宽 / 卡片宽 = 147/263 = 0.559**（不是原来的 2/3 —— 别纠结死值）。
+/// 卡片宽度用二分数值求解（原图宽度随卡片生长先抬后缩，两者互为函数，是固定点）。
+const double kCopyTriggerImageToCardRatio = 0.559;
+/// 复制图淡入的提前量（占整段动画的比例）：复制图在触发点之前就开始浮现，
+/// 到触发点时原图「稍比复制图更清晰」（原图 ≈ 0.62 vs 复制图 ≈ 0.38），
+/// 随后原图慢慢退到 0。调大 = 复制图更早更实；调小 = 触发时复制图更淡。
+const double kCopyFadeLead = 0.28;
 /// 卡片**高度进度**与**宽度进度**的关系指数：`h = w^p`。
 ///
 /// 由用户从 Apple 逐帧量出来的卡片尺寸拟合得到（源卡 104×138，满屏 400×860）：
@@ -1278,11 +1282,8 @@ const double kCopyTriggerOriginMultiplier = 1.5;
 /// 跑在宽度前面），触发时卡片是 156×455 的细长条，整页内容硬塞进去 →
 /// 看起来就是一张不动的缩略图。以这份实测数据为准。
 const double kCardHeightProgressPow = 1.352;
-/// 复制图淡入 / 原图淡出的交叠窗口长度（占整段动画的比例），
-/// 窗口以「原图宽 = 卡片宽 2/3」那一刻为**中心**。
-const double kCopyFadeSpan = 0.20;
 /// 卡片透明度的锚点（全部由曲线自然穿过，不是在某个点硬改数值 → 不会跳变）：
-///   起点 0.25  →  触发点(原图宽 = 卡片宽 2/3) 0.50  →  340/669 那点 0.93  →  满屏 1.0
+///   起点 0.25  →  触发点 0.50  →  340/669 那点 0.93  →  满屏 1.0
 const double kCardOpacityStart = 0.25;
 const double kCardOpacityAtTrigger = 0.50;
 /// 340/669 那一帧：基本不透明了但还没到 100%（复制图同一套透明度，值一样）。
@@ -1290,15 +1291,15 @@ const double kCardOpacityNearEnd = 0.93;
 /// 340/669 对应的**宽度进度**：Apple 实测 w = (340-104)/(400-104) ≈ 0.7973。
 const double kNearEndWidthProgress = 0.7973;
 
-/// 原图（被点那张封面）的「抬起 + 缩小退场」——修 Apple 逐帧对比发现的 BUG。
-///
-/// 实测原图宽度序列：158 → 164 → 164 → 160 → 146 → 133 → 115 → 几乎不可见
-/// 归一化到峰值 164：0.963 → 1.0 → 1.0 → 0.976 → 0.890 → 0.811 → 0.701
-/// 也就是：**点击瞬间向上平移一小段 + 微微放大，然后一边缩小一边淡出**。
-/// 之前的实现是「保持原始尺寸不动、只淡出」，跟 Apple 不一致。
-const double kSrcLiftPeakScale = 1.093; // 抬起峰值缩放
-const double kSrcEndScale = 0.767;      // 消失前缩到多少
-const double kSrcLiftShiftY = 0.06;     // 上移距离（占原图高度比例，"小段"）
+/// 原图（被点那张封面）的「抬起 + 缩小退场」——Apple 实测：
+/// 静态宽 157 → 抬起峰值 167（×1.064），向上平移 16px（≈ 0.077 × 图高）。
+const double kSrcLiftPeakScale = 1.064;
+const double kSrcLiftShiftY = 0.077;
+/// 峰值出现在「卡片 = 屏宽 52.4%」时；随后按 (1-t)^0.233 缩小
+/// （拟合 Apple 实测 162→147→133→119→不可见），到「卡片 = 屏宽 85.6%」时缩到 0。
+const double kSrcPeakScreenFraction = 0.524;
+const double kSrcGoneScreenFraction = 0.856;
+const double kSrcShrinkPow = 0.233;
 
 /// 动画时长（毫秒）。
 ///
@@ -1374,6 +1375,51 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
           c.maxWidth.isFinite ? c.maxWidth : mqSize.width,
           c.maxHeight.isFinite ? c.maxHeight : mqSize.height,
         );
+        // 只依赖尺寸、不依赖 g 的量全部提到逐帧 builder 外面。
+        // 「卡片宽度 / 屏宽」→ 进度 g 的换算（Apple 实测以屏宽占比为锚点）。
+        double gAtScreenFraction(double w) =>
+            ((w * size.width - originRect.width) /
+                    (size.width - originRect.width))
+                .clamp(0.001, 0.999);
+        final gPeak = gAtScreenFraction(kSrcPeakScreenFraction); // 原图抬起峰值
+        final gGone = gAtScreenFraction(kSrcGoneScreenFraction); // 原图缩到 0
+
+        // 原图缩放曲线（作为 g 的函数，独立于触发点）：
+        //   抬起段 [0,gPeak] easeOut 1.0→峰值；退场段 [gPeak,gGone] (1-t)^p → 0
+        double srcScaleAt(double gg) {
+          if (gg <= gPeak) {
+            final t = (gg / gPeak).clamp(0.0, 1.0);
+            return 1.0 +
+                (kSrcLiftPeakScale - 1.0) * Curves.easeOut.transform(t);
+          }
+          if (gg >= gGone) return 0.0;
+          final t = ((gg - gPeak) / (gGone - gPeak)).clamp(0.0, 1.0);
+          return kSrcLiftPeakScale *
+              math.pow(1.0 - t, kSrcShrinkPow).toDouble();
+        }
+
+        // 触发点：原图当前宽 = 卡片宽 × kCopyTriggerImageToCardRatio，
+        // 因为原图宽度本身是 g 的函数，这是固定点 → 二分数值求解（一次性，非逐帧）。
+        double solveTriggerG() {
+          double lo = 0.001, hi = 0.999;
+          for (int i = 0; i < 40; i++) {
+            final mid = (lo + hi) / 2;
+            final cardW =
+                originRect.width + (size.width - originRect.width) * mid;
+            final imgW = originRect.width * srcScaleAt(mid);
+            if (imgW > cardW * kCopyTriggerImageToCardRatio) {
+              lo = mid;
+            } else {
+              hi = mid;
+            }
+          }
+          return (lo + hi) / 2;
+        }
+        final triggerG = solveTriggerG();
+        // 复制图淡入起点 / 原图完全退出的交叠区间
+        final fadeStart = triggerG - kCopyFadeLead;
+        final fadeSpan = (gGone - fadeStart).clamp(0.05, 1.0);
+
         return AnimatedBuilder(
           animation: geo,
           builder: (context, _) {
@@ -1393,15 +1439,6 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             // 起点就是被点那张卡片本身（位置/宽高一致），终点满屏。
             // 宽进度 pw = g 线性；高进度 ph = pw^p，指数 p = kCardHeightProgressPow
             // （从 Apple 实测的卡片尺寸序列拟合而来）。全程连续，绝不会跳变。
-            // 「原图宽 = 卡片宽 2/3」用的是**抬起之后**的原图宽度：
-            // 抬起在触发点刚好到达峰值，所以这里的原图宽 = originRect.width × 峰值缩放。
-            // （不乘峰值的话，抬起后原图变大了，2/3 的比例就不成立了。）
-            final triggerG = ((kCopyTriggerOriginMultiplier *
-                            kSrcLiftPeakScale *
-                            originRect.width -
-                        originRect.width) /
-                    (size.width - originRect.width))
-                .clamp(0.001, 0.999);
             final pw = g;
             final ph = math.pow(pw, kCardHeightProgressPow).toDouble();
             final cardRect = Rect.fromLTWH(
@@ -1453,38 +1490,23 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             // 整页按 s = 卡片宽度 / 屏宽 等比缩小，左上角钉在卡片左上角，裁进卡片。
             // g=1 时 s=1、卡片=满屏，内容正好等于页面本体 —— 终点不需要换图。
             final s = (cardRect.width / size.width).clamp(0.0, 1.0);
-            // 交叠进度 u —— 窗口以**触发点为中心**，而不是从触发点才开始：
-            //   u=0    窗口起点，复制图开始浮现（原图最实）
-            //   u=0.5  触发点（原图宽 = 卡片宽 2/3），两者透明度**相等**
-            //   u=1    窗口末尾，复制图完全接管，原图归零
-            // 这样"相等"是由曲线自然穿过，不是在某个点硬赋同一个值，不会跳变。
-            final u = ((g - (triggerG - kCopyFadeSpan * 0.5)) / kCopyFadeSpan)
-                .clamp(0.0, 1.0);
+            // 交叠进度 u —— 复制图在触发点之前 kCopyFadeLead 就开始淡入：
+            //   u=0     复制图刚浮现（原图最实）
+            //   触发点   原图「稍比复制图更清晰」（u ≈ 0.3）
+            //   u=1     原图完全归零（卡片 ≈ 屏宽 85.6%），复制图完全接管
+            final u = ((g - fadeStart) / fadeSpan).clamp(0.0, 1.0);
             final copyFade = u;
-            // 原图与复制图互补：u<0.5 时原图更实（"稍微实一些"），
-            // u=0.5 恰好相等，u>0.5 后复制图接管并把原图推到 0。
+            // 原图与复制图互补：u<0.5 时原图更实，u>0.5 后复制图接管。
             final srcFade = 1.0 - u;
 
             // ---------- ④ 原图：钉在卡片左上角 + 抬起 + 缩小退场 ----------
-            // Apple 实测：点击瞬间向上平移一小段并微微放大（"抬起"），
-            // 到触发点达到峰值，然后一边缩小一边淡出，始终把左上角钉在卡片左上角。
-            // 用 lift / shrink 两段曲线首尾相接，全程连续，无跳变。
-            final double srcScale;
-            if (g <= triggerG) {
-              // 抬起：1.0 → kSrcLiftPeakScale
-              final t = (g / triggerG).clamp(0.0, 1.0);
-              srcScale =
-                  1.0 + (kSrcLiftPeakScale - 1.0) * Curves.easeOut.transform(t);
-            } else {
-              // 退场：kSrcLiftPeakScale → kSrcEndScale
-              final t = ((g - triggerG) / (1.0 - triggerG)).clamp(0.0, 1.0);
-              srcScale = kSrcLiftPeakScale -
-                  (kSrcLiftPeakScale - kSrcEndScale) *
-                      Curves.easeInOut.transform(t);
-            }
+            // Apple 实测：点击瞬间向上平移并微微放大（峰值 ×1.064），
+            // 峰值在「卡片 = 屏宽 52.4%」时，随后按 (1-t)^0.233 缩小到 0，
+            // 左上角始终钉在卡片左上角。全程连续，无跳变。
+            final srcScale = srcScaleAt(g);
             // 抬起过程中向上平移小段距离（抬起完成后保持）
             final liftAmount =
-                Curves.easeOut.transform((g / triggerG).clamp(0.0, 1.0));
+                Curves.easeOut.transform((g / gPeak).clamp(0.0, 1.0));
             final srcDy = -kSrcLiftShiftY * originRect.height * liftAmount;
 
             final srcRect = Rect.fromLTWH(
@@ -3127,9 +3149,11 @@ class _AlbumHeader extends StatelessWidget {
         final mqW = MediaQuery.of(context).size.width;
         final availW = c.maxWidth.isFinite ? c.maxWidth : mqW;
         // 封面保持与网格卡片一致的竖向比例（_cardW : _cardH），避免拉伸。
+        // 宽度 = 屏宽 × 2/3：Apple 实测复制图（= 详情页封面）终值 265/397 ≈ 0.667。
+        // 之前用 0.40 会导致复制图相对卡片明显偏小，与 Apple 观感不符。
         const cardRatio =
             _CategoryCardsSection._cardW / _CategoryCardsSection._cardH; // w/h
-        final coverW = (availW * 0.40).clamp(150.0, 220.0);
+        final coverW = availW * 0.667;
         final coverH = coverW / cardRatio;
 
         return Padding(
