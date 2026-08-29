@@ -1290,10 +1290,14 @@ const double kCardOpacityNearEnd = 0.93;
 /// 340/669 对应的**宽度进度**：Apple 实测 w = (340-104)/(400-104) ≈ 0.7973。
 const double kNearEndWidthProgress = 0.7973;
 
-/// 动画时长（毫秒）。调优阶段放慢方便逐帧截图对比，定稿后改回 780 / 560。
-/// 你给的区间是 1.51s~2.38s，取几何均值 ≈ 1.90s。想再快/再慢只改这两个数。
-const int kOpenDurationMs = 1900;
-const int kCloseDurationMs = 1500;
+/// 动画时长（毫秒）。
+///
+/// 实测来源：Apple 录屏时间轴上，卡片从开始展开到铺满全屏发生在
+/// **1.51s → 2.38s**，所以真实时长 = 2.38 - 1.51 = **0.87s ≈ 870ms**（不到 1 秒）。
+/// 返回动画 Apple 一般比打开略快，按 0.71 倍取 ≈ 620ms。
+/// 想再快/再慢只改这两个数即可。
+const int kOpenDurationMs = 870;
+const int kCloseDurationMs = 620;
 
 /// Apple Music 风格打开动画路由：用 `PopupRoute` 替代 `PageRouteBuilder(opaque:false)`，
 /// 既保留「旧首页可见 + 卡片扩展 + 封面飞行」效果，又避免 web 下自定义 page route 的 pop 失灵。
