@@ -1317,12 +1317,10 @@ const double kSrcGoneProgress = 0.703;
 
 /// 动画时长（毫秒）。
 ///
-/// 实测来源：Apple 录屏时间轴上，卡片从开始展开到铺满全屏发生在
-/// **1.51s → 2.38s**，所以真实时长 = 2.38 - 1.51 = **0.87s ≈ 870ms**（不到 1 秒）。
-/// 返回动画 Apple 一般比打开略快，按 0.71 倍取 ≈ 620ms。
-/// 想再快/再慢只改这两个数即可。
-const int kOpenDurationMs = 870;
-const int kCloseDurationMs = 620;
+/// Apple 120Hz 实测：从点击（1.51s）到视觉上展开到位（1.91s）≈ 0.4s。
+/// 返回动画一般比打开快，按 0.7 倍取 280ms。
+const int kOpenDurationMs = 400;
+const int kCloseDurationMs = 280;
 
 /// 锚点表线性插值：`anchors[i]` 对应进度 `i / (n-1)`，x ∈ [0,1]。
 double _lerpAnchors(List<double> anchors, double x) {
