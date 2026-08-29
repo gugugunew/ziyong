@@ -1125,6 +1125,9 @@ class _CategoryCardsSection extends StatelessWidget {
                       onTap: (rect) async {
                         // 进入词表页期间暂停主页 Banner 自动滚动（性能 + 视觉）
                         _bannerAuto.pause();
+                        // 隐藏 grid 里被点的静态封面：由飞行层「原图」副本接管，
+                        // 避免静态图 + 副本同时显示（重影）。
+                        _flyingCoverBook.value = book;
                         // 只传源卡片矩形。终点矩形**不在这里算** ——
                         // 这里拿到的 MediaQuery.size 可能是整个浏览器窗口的尺寸
                         // （iPhone 外壳下 MaterialApp 继承的 MediaQuery 不可靠），
@@ -1132,7 +1135,8 @@ class _CategoryCardsSection extends StatelessWidget {
                         // 路由层则用 LayoutBuilder 拿真实尺寸来缩放。
                         await Navigator.of(context)
                             .push(_appleOpenRoute(book, rect));
-                        // pop 后恢复（无副作用：仅通知 Banner 监听者）
+                        // pop（返回动画播完）后恢复静态封面 + Banner
+                        _flyingCoverBook.value = null;
                         _bannerAuto.resume();
                       },
                     );
@@ -1188,7 +1192,15 @@ class _CategoryBookCover extends StatelessWidget {
         width: _CategoryCardsSection._cardW,
         height: _CategoryCardsSection._cardH,
         alignment: Alignment.center,
-        child: Stack(
+        // 这本书正在飞行时，静态封面隐藏（Opacity 0，布局占位保持，grid 不跳），
+        // 由飞行层副本接管；返回动画播完后恢复。Apple 里被点的格子也是腾空的。
+        child: ValueListenableBuilder<_WordBook?>(
+          valueListenable: _flyingCoverBook,
+          builder: (context, flying, child) => Opacity(
+            opacity: identical(flying, book) ? 0.0 : 1.0,
+            child: child,
+          ),
+          child: Stack(
           alignment: Alignment.bottomCenter,
           children: [
             // 底部书影： screenshot 风格的柔和矩形阴影
@@ -1244,6 +1256,7 @@ class _CategoryBookCover extends StatelessWidget {
               ),
             ),
           ],
+          ),
         ),
       ),
     );
@@ -1613,6 +1626,13 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
 Route<dynamic> _appleOpenRoute(_WordBook book, Rect originRect) {
   return _AppleOpenRoute<dynamic>(book: book, originRect: originRect);
 }
+
+/// 正在飞行（打开/返回动画中）的那本书：grid 里对应的**静态封面要隐藏**，
+/// 由路由飞行层的「原图」副本接管（抬起→缩小→淡出）。
+/// 否则静态图和副本同时显示 → 两张叠在一起（重影）。
+/// 返回动画播完（push 的 future resolve）后恢复显示。
+final ValueNotifier<_WordBook?> _flyingCoverBook =
+    ValueNotifier<_WordBook?>(null);
 
 // 类别顶部横向滚动大横幅（Apple Music Essentials 风格）
 class _CategoryBanner extends StatefulWidget {
