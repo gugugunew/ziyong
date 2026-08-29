@@ -19,15 +19,30 @@ workflows:
 
       - name: 构建未签名 iOS App 并打包成 IPA（仅真机，去掉模拟器）
         script: |
+          set -e
+          set -x
           # 去掉模拟器架构（x86_64），确保 IPA 只含真机 arm64，
           # 否则爱思助手签名安装时会报错/警告。
           export EXCLUDED_ARCHS=x86_64
           flutter build ios --release --no-codesign
+          # 调试：确认输出目录，避免空包。
+          echo "=== build/ios/iphoneos 目录 ==="
+          ls -la build/ios/iphoneos/ || true
+          if [ ! -d "build/ios/iphoneos/Runner.app" ]; then
+            echo "错误：build/ios/iphoneos/Runner.app 不存在，构建失败或输出路径不对。"
+            exit 1
+          fi
           # 打包成标准 IPA：Payload/Runner.app，不额外再套一层 zip。
           rm -rf Payload app.ipa
           mkdir -p Payload
           cp -r build/ios/iphoneos/Runner.app Payload/
+          # 确认 Payload 非空
+          echo "=== Payload 内容 ==="
+          du -sh Payload/Runner.app
+          ls -la Payload/Runner.app
           zip -r -9 app.ipa Payload
+          echo "=== 最终 app.ipa 大小 ==="
+          ls -lh app.ipa
 
     artifacts:
       - app.ipa
