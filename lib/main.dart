@@ -1452,9 +1452,9 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                     .clamp(0.0, 1.0);
             final g = _kOpenCurve.transform(expRaw);
 
-            // 动画结束后直接把页面本体交出去：
-            // 省掉 BackdropFilter 模糊层，否则列表滚动时一直挂着全屏模糊，掉帧。
-            if (g >= 1.0 && liftRaw >= 1.0) return child;
+            // 动画结束后（animation.value 真正到 1.0）再把页面本体交出去。
+            // 用 g>=1.0 会提前切回 child，若 Stack 最终帧与 child 有亚像素差就会跳一下。
+            if (animation.value >= 1.0) return child;
 
             final isDark = Theme.of(context).brightness == Brightness.dark;
             final surface = isDark ? const Color(0xFF1C1C1E) : Colors.white;
@@ -1481,12 +1481,17 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             );
 
             // ---------- ② 卡片透明度 ----------
-            // 抬升段(0→kLiftDurationMs)卡片完全透明，只有封面在动；
-            // 展开段才进入透明度斜坡。expMs = 展开段真实毫秒。
+            // 抬升段末尾提前 10ms 开始从 0 淡到 0.2，消除「20ms 处 0→0.2 硬跳」。
+            // 展开段继续 0.2 → 0.85（50ms），之后跟随宽度进度到 1.0。
             final expMs = (tMs - kLiftDurationMs).clamp(0.0, double.infinity);
+            const double fadeLeadMs = 10.0;
             final double cardOpacityRaw;
-            if (liftRaw < 1.0) {
+            if (tMs <= kLiftDurationMs - fadeLeadMs) {
               cardOpacityRaw = 0.0;
+            } else if (tMs <= kLiftDurationMs) {
+              final p = (tMs - (kLiftDurationMs - fadeLeadMs)) / fadeLeadMs;
+              cardOpacityRaw =
+                  kCardOpacityRampStart * Curves.easeIn.transform(p);
             } else if (expMs <= kCardOpacityRampMs) {
               cardOpacityRaw = kCardOpacityRampStart +
                   (kCardOpacityStart - kCardOpacityRampStart) *
@@ -1523,32 +1528,46 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
 
             // ---------- ④ 原图缩放（同一张封面贯穿抬升+展开）----------
             // 抬升段：随 liftEase 从 1.0 放大到峰值 ×1.0357；
-            // 展开段（卡片一出来的那一刻起）：钉在卡片左上角，从峰值开始
-            // 随卡片宽进度 g 平稳持续缩小，到 kSrcGoneProgress 收到 0（尺寸比透明度收尾更晚）。
-            // 不再"先保持峰值再骤缩"。
+            // 展开段：钉在卡片左上角，从峰值开始随 g 平稳缩小到 0。
+            // 用 inExpand 做软切换（而不是 liftRaw<1.0 硬切），边界处数值天然相等，不会跳。
+            final inExpand = g > 0.0;
             final double srcScale;
-            if (liftRaw < 1.0) {
-              srcScale = 1.0 + (kSrcLiftPeakScale - 1.0) * liftEase;
-            } else {
+            if (inExpand) {
               final t = (g / kSrcGoneProgress).clamp(0.0, 1.0);
               srcScale = kSrcLiftPeakScale *
                   math.pow(1.0 - t, kSrcShrinkPow).toDouble();
+            } else {
+              srcScale = 1.0 + (kSrcLiftPeakScale - 1.0) * liftEase;
             }
 
-            // 旧首页压暗/模糊：与卡片透明度同步渐强
+            // 旧首页压暗：与卡片透明度同步渐强（去掉 BackdropFilter，真机掉帧）。
             final dimOpacity = cardOpacity;
+
+            // 3) 原图（封面）：贯穿「抬升→展开」的同一张，作为卡片兄弟层、独立透明度。
+            //    - 非展开段（g==0，抬升或关闭末尾回落）：钉在网格原位、向上位移
+            //      liftY*liftEase、放大到峰值，圆角从 12 平滑过渡到 cardRadius。
+            //    - 展开段（g>0）：钉在卡片左上角，随卡片圆角裁切 → 不会飞出卡片。
+            //    关闭动画末尾，liftEase 从 1→0，封面会从 lifted 位置自然落回网格原位，
+            //    不再像之前那样在最后一帧突然下掉 25px。
+            final srcTop = inExpand
+                ? cardRect.top
+                : originRect.top - liftY * liftEase;
+            final srcLeft = inExpand ? cardRect.left : originRect.left;
+            final srcW = inExpand ? cardRect.width : originRect.width;
+            final srcH = inExpand ? cardRect.height : originRect.height;
+            final srcRadius = inExpand
+                ? cardRadius
+                : 12.0 + (cardRadius - 12.0) * liftEase;
 
             return Stack(
               children: [
-                // 1) 旧首页保持可见，被遮罩 + 模糊压暗（纯视觉，不拦截点击）
+                // 1) 旧首页保持可见，被纯色遮罩压暗（纯视觉，不拦截点击）。
+                // 去掉 BackdropFilter：真机上全屏模糊 + 动画同步跑极易掉帧，观感变卡。
                 Positioned.fill(
                   child: IgnorePointer(
                     child: Opacity(
                       opacity: dimOpacity,
-                      child: BackdropFilter(
-                        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                        child: Container(color: dimColor),
-                      ),
+                      child: Container(color: dimColor),
                     ),
                   ),
                 ),
@@ -1589,16 +1608,21 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                             Positioned.fill(
                               child: Opacity(
                                 opacity: copyFade,
-                                child: OverflowBox(
-                                  alignment: Alignment.topLeft,
-                                  minWidth: size.width,
-                                  maxWidth: size.width,
-                                  minHeight: size.height,
-                                  maxHeight: size.height,
-                                  child: Transform.scale(
-                                    scale: s,
+                                // RepaintBoundary：把整页复制图隔离成独立重绘层，
+                                // 缩放/透明度变化时只光栅化这一层，减少每帧重绘范围
+                                // （120Hz 每帧预算仅 8.3ms，掉帧主因是复制图每帧重建整页）。
+                                child: RepaintBoundary(
+                                  child: OverflowBox(
                                     alignment: Alignment.topLeft,
-                                    child: child,
+                                    minWidth: size.width,
+                                    maxWidth: size.width,
+                                    minHeight: size.height,
+                                    maxHeight: size.height,
+                                    child: Transform.scale(
+                                      scale: s,
+                                      alignment: Alignment.topLeft,
+                                      child: child,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -1610,22 +1634,14 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                   ),
                 ),
 
-                // 3) 原图（封面）：贯穿「抬升→展开」的同一张，作为卡片兄弟层、独立透明度。
-                //    - 抬升段：钉在网格原位、向上位移 liftY*liftEase、放大到峰值，受自身圆角裁切。
-                //    - 展开段：钉在卡片左上角（卡片自身已含抬起偏移，故不再额外位移）、
-                //      随卡片圆角裁切 → 不会飞出卡片。
-                //    透明度只用 srcFade（不被 cardOpacity 压低），所以两阶段衔接处不跳变。
+                // 3) 原图（封面）
                 Positioned(
-                  left: liftRaw < 1.0 ? originRect.left : cardRect.left,
-                  top: liftRaw < 1.0
-                      ? originRect.top - liftY * liftEase
-                      : cardRect.top,
-                  width: liftRaw < 1.0 ? originRect.width : cardRect.width,
-                  height: liftRaw < 1.0 ? originRect.height : cardRect.height,
+                  left: srcLeft,
+                  top: srcTop,
+                  width: srcW,
+                  height: srcH,
                   child: ClipRRect(
-                    borderRadius: BorderRadius.circular(
-                      liftRaw < 1.0 ? 12.0 : cardRadius,
-                    ),
+                    borderRadius: BorderRadius.circular(srcRadius),
                     child: IgnorePointer(
                       child: Opacity(
                         opacity: srcFade,
@@ -3119,19 +3135,13 @@ Widget _coverBoxWidget({
       child: Container(
         color: Colors.transparent,
         alignment: Alignment.center,
-        child: Image.asset(
+        child:           Image.asset(
           book.cover,
           fit: BoxFit.contain,
           cacheWidth: 520,
-          frameBuilder: (context, child, frame, sync) {
-            if (sync) return child;
-            return AnimatedOpacity(
-              opacity: frame == null ? 0 : 1,
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOut,
-              child: child,
-            );
-          },
+          // 不在飞行层/复制图里做 frameBuilder 淡入：图片首次 decode 时的 200ms
+          // 淡入会叠在 srcFade/copyFade 上，导致第一次柔和、第二次（已进 ImageCache）
+          // 突兀出现 → 表现为"原图跳/封面跳"。本地资源走 ImageCache，直接显示不闪。
           errorBuilder: (_, _, _) => const ColoredBox(color: Colors.transparent),
         ),
       ),
