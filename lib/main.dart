@@ -1281,15 +1281,19 @@ const double kCardHeightProgressPow = 1.352;
 /// 复制图淡入 / 原图淡出的交叠窗口长度（占整段动画的比例），
 /// 窗口以「原图宽 = 卡片宽 2/3」那一刻为**中心**。
 const double kCopyFadeSpan = 0.20;
-/// 卡片透明度的三个锚点：起点 / 触发点（原图宽 = 卡片宽 2/3 时）/ 满屏。
-/// 三者用一条幂曲线连起来，是连续过程；改这里的数值不会造成跳变。
+/// 卡片透明度的锚点（全部由曲线自然穿过，不是在某个点硬改数值 → 不会跳变）：
+///   起点 0.25  →  触发点(原图宽 = 卡片宽 2/3) 0.50  →  340/669 那点 0.93  →  满屏 1.0
 const double kCardOpacityStart = 0.25;
 const double kCardOpacityAtTrigger = 0.50;
+/// 340/669 那一帧：基本不透明了但还没到 100%（复制图同一套透明度，值一样）。
+const double kCardOpacityNearEnd = 0.93;
+/// 340/669 对应的**宽度进度**：Apple 实测 w = (340-104)/(400-104) ≈ 0.7973。
+const double kNearEndWidthProgress = 0.7973;
 
 /// 动画时长（毫秒）。调优阶段放慢方便逐帧截图对比，定稿后改回 780 / 560。
-/// 想再快/再慢只改这两个数即可。
-const int kOpenDurationMs = 1800;
-const int kCloseDurationMs = 1400;
+/// 你给的区间是 1.51s~2.38s，取几何均值 ≈ 1.90s。想再快/再慢只改这两个数。
+const int kOpenDurationMs = 1900;
+const int kCloseDurationMs = 1500;
 
 /// Apple Music 风格打开动画路由：用 `PopupRoute` 替代 `PageRouteBuilder(opaque:false)`，
 /// 既保留「旧首页可见 + 卡片扩展 + 封面飞行」效果，又避免 web 下自定义 page route 的 pop 失灵。
@@ -1389,19 +1393,36 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
               originRect.height + (size.height - originRect.height) * ph,
             );
 
-            // ---------- ② 卡片透明度：起点 → 触发点 50% → 满屏 100% ----------
-            // 三个锚点用**一条幂曲线**同时穿过，是连续过程；
-            // 在某个点硬切数值（比如 if(到 2/3) 就设 0.5）就会跳变。
-            // 解 kStart + (1-kStart) * g^p = kTrigger
-            //   → g^p = (kTrigger - kStart)/(1 - kStart)
-            //   → p   = ln((kTrigger - kStart)/(1 - kStart)) / ln(triggerG)
-            // triggerG 由几何算出，换设备 / 换卡片比例都不用改数值。
-            final target = (((kCardOpacityAtTrigger - kCardOpacityStart) /
+            // ---------- ② 卡片透明度：四个锚点，两段幂曲线 ----------
+            //   起点 0.25 → 触发点 0.50 → 340/669 那点 0.93 → 满屏 1.0
+            // 四个锚点用**两段幂曲线**连起来（在触发点处首尾相接），
+            // 全部是曲线自然穿过，不是在某个点硬赋值，所以不会跳变。
+            // 归一化：cardOpacity = kStart + (1-kStart) * fill
+            final firstFill = (((kCardOpacityAtTrigger - kCardOpacityStart) /
                     (1.0 - kCardOpacityStart))
                 .clamp(0.01, 0.99));
-            final cardFillPow =
-                (math.log(target) / math.log(triggerG)).clamp(0.15, 6.0);
-            final fill = math.pow(g, cardFillPow).toDouble();
+            final nearFill = (((kCardOpacityNearEnd - kCardOpacityStart) /
+                    (1.0 - kCardOpacityStart))
+                .clamp(0.01, 0.99));
+            // 第一段 [0, triggerG]：fill = firstFill * (g/triggerG)^pA
+            final pA =
+                (math.log(firstFill) / math.log(triggerG)).clamp(0.15, 6.0);
+            // 第二段 [triggerG, 1]：fill = firstFill + (1-firstFill) * b^pB
+            //   强制穿过 (kNearEndWidthProgress, nearFill)
+            final bNear = (((kNearEndWidthProgress - triggerG) /
+                    (1.0 - triggerG))
+                .clamp(0.01, 0.99));
+            final segTarget =
+                (((nearFill - firstFill) / (1.0 - firstFill)).clamp(0.01, 0.99));
+            final pB = (math.log(segTarget) / math.log(bNear)).clamp(0.15, 6.0);
+
+            final double fill;
+            if (g <= triggerG) {
+              fill = firstFill * math.pow(g / triggerG, pA).toDouble();
+            } else {
+              final b = ((g - triggerG) / (1.0 - triggerG)).clamp(0.0, 1.0);
+              fill = firstFill + (1.0 - firstFill) * math.pow(b, pB).toDouble();
+            }
             final cardOpacity =
                 (kCardOpacityStart + (1.0 - kCardOpacityStart) * fill)
                     .clamp(0.0, 1.0);
