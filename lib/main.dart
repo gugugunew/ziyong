@@ -1290,6 +1290,16 @@ const double kCardOpacityNearEnd = 0.93;
 /// 340/669 对应的**宽度进度**：Apple 实测 w = (340-104)/(400-104) ≈ 0.7973。
 const double kNearEndWidthProgress = 0.7973;
 
+/// 原图（被点那张封面）的「抬起 + 缩小退场」——修 Apple 逐帧对比发现的 BUG。
+///
+/// 实测原图宽度序列：158 → 164 → 164 → 160 → 146 → 133 → 115 → 几乎不可见
+/// 归一化到峰值 164：0.963 → 1.0 → 1.0 → 0.976 → 0.890 → 0.811 → 0.701
+/// 也就是：**点击瞬间向上平移一小段 + 微微放大，然后一边缩小一边淡出**。
+/// 之前的实现是「保持原始尺寸不动、只淡出」，跟 Apple 不一致。
+const double kSrcLiftPeakScale = 1.093; // 抬起峰值缩放
+const double kSrcEndScale = 0.767;      // 消失前缩到多少
+const double kSrcLiftShiftY = 0.06;     // 上移距离（占原图高度比例，"小段"）
+
 /// 动画时长（毫秒）。
 ///
 /// 实测来源：Apple 录屏时间轴上，卡片从开始展开到铺满全屏发生在
@@ -1383,11 +1393,15 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             // 起点就是被点那张卡片本身（位置/宽高一致），终点满屏。
             // 宽进度 pw = g 线性；高进度 ph = pw^p，指数 p = kCardHeightProgressPow
             // （从 Apple 实测的卡片尺寸序列拟合而来）。全程连续，绝不会跳变。
-            final triggerG =
-                ((kCopyTriggerOriginMultiplier * originRect.width -
-                            originRect.width) /
-                        (size.width - originRect.width))
-                    .clamp(0.001, 0.999);
+            // 「原图宽 = 卡片宽 2/3」用的是**抬起之后**的原图宽度：
+            // 抬起在触发点刚好到达峰值，所以这里的原图宽 = originRect.width × 峰值缩放。
+            // （不乘峰值的话，抬起后原图变大了，2/3 的比例就不成立了。）
+            final triggerG = ((kCopyTriggerOriginMultiplier *
+                            kSrcLiftPeakScale *
+                            originRect.width -
+                        originRect.width) /
+                    (size.width - originRect.width))
+                .clamp(0.001, 0.999);
             final pw = g;
             final ph = math.pow(pw, kCardHeightProgressPow).toDouble();
             final cardRect = Rect.fromLTWH(
@@ -1451,11 +1465,31 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             // u=0.5 恰好相等，u>0.5 后复制图接管并把原图推到 0。
             final srcFade = 1.0 - u;
 
-            // ---------- ④ 原图：钉在卡片左上角，保持原始尺寸 ----------
-            // 不飞、不缩放：它就是被点那张封面，跟着卡片左上角一起被顶上去。
+            // ---------- ④ 原图：钉在卡片左上角 + 抬起 + 缩小退场 ----------
+            // Apple 实测：点击瞬间向上平移一小段并微微放大（"抬起"），
+            // 到触发点达到峰值，然后一边缩小一边淡出，始终把左上角钉在卡片左上角。
+            // 用 lift / shrink 两段曲线首尾相接，全程连续，无跳变。
+            final double srcScale;
+            if (g <= triggerG) {
+              // 抬起：1.0 → kSrcLiftPeakScale
+              final t = (g / triggerG).clamp(0.0, 1.0);
+              srcScale =
+                  1.0 + (kSrcLiftPeakScale - 1.0) * Curves.easeOut.transform(t);
+            } else {
+              // 退场：kSrcLiftPeakScale → kSrcEndScale
+              final t = ((g - triggerG) / (1.0 - triggerG)).clamp(0.0, 1.0);
+              srcScale = kSrcLiftPeakScale -
+                  (kSrcLiftPeakScale - kSrcEndScale) *
+                      Curves.easeInOut.transform(t);
+            }
+            // 抬起过程中向上平移小段距离（抬起完成后保持）
+            final liftAmount =
+                Curves.easeOut.transform((g / triggerG).clamp(0.0, 1.0));
+            final srcDy = -kSrcLiftShiftY * originRect.height * liftAmount;
+
             final srcRect = Rect.fromLTWH(
               cardRect.left,
-              cardRect.top,
+              cardRect.top + srcDy,
               originRect.width,
               originRect.height,
             );
@@ -1528,7 +1562,9 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                   ),
                 ),
 
-                // 3) 原图：钉在卡片左上角，保持原始尺寸，不飞不缩放；
+                // 3) 原图：钉在卡片左上角（不飞），但会**抬起 + 缩小退场**：
+                //    点击瞬间上移一小段并微微放大，随后一边缩到 kSrcEndScale 一边淡出。
+                //    用 Transform.scale(topLeft) 保证左上角始终钉在卡片左上角。
                 //    透明度 = 卡片透明度 × 淡出系数，与外框同步变实/变虚。
                 Positioned(
                   left: srcRect.left,
@@ -1538,13 +1574,17 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                   child: IgnorePointer(
                     child: Opacity(
                       opacity: (cardOpacity * srcFade).clamp(0.0, 1.0),
-                      child: _coverBoxWidget(
-                        book: book,
-                        surface: surface,
-                        isDark: isDark,
-                        width: srcRect.width,
-                        height: srcRect.height,
-                        radius: 12.0,
+                      child: Transform.scale(
+                        scale: srcScale,
+                        alignment: Alignment.topLeft,
+                        child: _coverBoxWidget(
+                          book: book,
+                          surface: surface,
+                          isDark: isDark,
+                          width: srcRect.width,
+                          height: srcRect.height,
+                          radius: 12.0,
+                        ),
                       ),
                     ),
                   ),
