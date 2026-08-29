@@ -1256,6 +1256,61 @@ class _CategoryBookCover extends StatelessWidget {
 ///
 /// 同理，几何进度算出来之后**不要再叠一层 easeOutCubic**：
 /// 几何只用一条曲线当「时钟」，尺寸线性跟随它（不再叠加第二层前置曲线）。
+/// 单调三次插值（Fritsch–Carlson）：穿过给定锚点、C1 连续、保持单调。
+/// 把 Apple 逐帧实测的「折线」变成无拐点（kink）的平滑曲线，
+/// 直接消除 120Hz 下因线性插值段间斜率突变造成的微顿挫（轨迹形状与实测一致）。
+class _MonotoneCubic {
+  final List<double> xs;
+  final List<double> ys;
+  late final List<double> _m;
+  _MonotoneCubic(this.xs, this.ys) {
+    final n = xs.length;
+    final dy = List<double>.filled(n - 1, 0.0);
+    for (int i = 0; i < n - 1; i++) {
+      final dx = xs[i + 1] - xs[i];
+      dy[i] = (ys[i + 1] - ys[i]) / dx;
+    }
+    _m = List<double>.filled(n, 0.0);
+    _m[0] = dy[0];
+    _m[n - 1] = dy[n - 2];
+    for (int i = 1; i < n - 1; i++) {
+      _m[i] = (dy[i - 1] * dy[i] <= 0) ? 0.0 : (dy[i - 1] + dy[i]) / 2.0;
+    }
+    for (int i = 0; i < n - 1; i++) {
+      if (dy[i] == 0.0) {
+        _m[i] = 0.0;
+        _m[i + 1] = 0.0;
+      } else {
+        final a = _m[i] / dy[i];
+        final b = _m[i + 1] / dy[i];
+        final s = a * a + b * b;
+        if (s > 9.0) {
+          final t = 3.0 / math.sqrt(s);
+          _m[i] = t * a * dy[i];
+          _m[i + 1] = t * b * dy[i];
+        }
+      }
+    }
+  }
+  double eval(double x) {
+    final n = xs.length;
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    int i = 0;
+    while (i < n - 1 && x > xs[i + 1]) {
+      i++;
+    }
+    final h = xs[i + 1] - xs[i];
+    final t = (x - xs[i]) / h;
+    final t2 = t * t;
+    final t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * ys[i] +
+        (t3 - 2 * t2 + t) * h * _m[i] +
+        (-2 * t3 + 3 * t2) * ys[i + 1] +
+        (t3 - t2) * h * _m[i + 1];
+  }
+}
+
 /// 这条曲线直接按用户逐帧实测数据拟合（见 _MeasuredOpenCurve）。
 const Curve _kOpenCurve = _MeasuredOpenCurve();
 
@@ -1267,10 +1322,18 @@ const Curve _kOpenCurve = _MeasuredOpenCurve();
 class _MeasuredOpenCurve extends Curve {
   const _MeasuredOpenCurve();
 
-  // τ = 归一化动画进度(0..1)，由 _tau 表直接给出
+  static final _MonotoneCubic _mono = _MonotoneCubic(_tau, _pw);
+
+  // τ = 归一化动画进度(0..1)，由 _tau 表直接给出。
+  // ⚠️ 刻度：τ = Apple 实测时刻(tMs) / **400**，不是 /500。
+  //    Apple 那整段动作只占 400ms（卡片 370ms 长满、400ms 收尾）。
+  //    若按 /500 建表，卡片会在 74% 时长就长满、剩下 26% 完全静止 →
+  //    观感是「一下全部展开然后停住」，不像 Apple 那样全程慢慢长大。
+  //    按 /400 归一化后，当前 kOpenDurationMs=500 会把动作等比拉伸 1.25×，
+  //    卡片长满落在 92.5%（≈462ms），与 Apple 的相对节奏一致，静止尾巴仅 38ms。
   static const List<double> _tau = <double>[
-    0.00, 0.08, 0.12, 0.16, 0.18, 0.22, 0.24, 0.28, 0.32, 0.36,
-    0.40, 0.42, 0.46, 0.48, 0.56, 0.58, 0.62, 0.66, 0.70, 0.74,
+    0.000, 0.100, 0.150, 0.200, 0.225, 0.275, 0.300, 0.350, 0.400, 0.450,
+    0.500, 0.525, 0.575, 0.600, 0.700, 0.725, 0.775, 0.825, 0.875, 0.925,
   ];
   static const List<double> _pw = <double>[
     0.000, 0.225, 0.325, 0.450, 0.545, 0.637, 0.704, 0.767, 0.851, 0.880,
@@ -1280,16 +1343,8 @@ class _MeasuredOpenCurve extends Curve {
   @override
   double transform(double t) {
     if (t <= 0.0) return 0.0;
-    if (t >= 0.74) return 1.0;
-    for (int i = 0; i < _tau.length - 1; i++) {
-      final t0 = _tau[i];
-      final t1 = _tau[i + 1];
-      if (t >= t0 && t <= t1) {
-        final f = (t - t0) / (t1 - t0);
-        return _pw[i] + (_pw[i + 1] - _pw[i]) * f;
-      }
-    }
-    return 1.0;
+    if (t >= 0.925) return 1.0;
+    return _mono.eval(t);
   }
 }
 
@@ -1302,18 +1357,35 @@ const double kCopyAppearProgress = 0.3254;
 /// 调大 = 复制图更早更实；调小 = 触发时复制图更淡。
 const double kCopyFadeLead = 0.28;
 
-/// 卡片**高度进度**锚点表（自变量 = 宽度进度 pw = g，17 个均匀网格点，线性插值）。
+/// 卡片**高度进度**锚点表（值 = (实测高 − 140) / 617）。
 ///
-/// Apple Music 120Hz 逐帧实测（卡片 140×140 → 349×760）：
-///   187/282 208/340 234/400 254/454 273/508 287/551 300/595 318/640 …
-///   340/724 343/736 346/747 349/760
-/// 幂律 h=w^p 拟合最大误差 47px（p 前段≈1.0、后段≈1.4，不是常数），
-/// 故改为锚点插值：最大误差 5px、RMS 1.7px（<1%）。高度进度整体落后于
-/// 宽度进度 → 卡片先变宽、再慢慢变高，是自然的「长大」过程。
+/// ⚠️ 自变量是**时间 τ（= expRaw = tMs/kOpenDurationMs）**，不是宽度进度 pw。
+/// 关键：实测里高度有自己独立的时间线——宽 347 在 330~350ms 已停住，高还在
+/// 751→755；宽 370ms 满(349)，高要 400ms 才到 757。若把高写成宽的函数
+/// (ph = f(pw))，宽一停高就跟着停，这条「高度尾巴」会被吃掉，卡片收尾显短、显急。
+/// 改为按时间独立插值后，宽高各自跑自己的曲线 → 卡片收尾更从容，与实测一致。
+/// 高度进度整体落后于宽度进度 → 先变宽、再慢慢变高，是自然的「长大」过程。
 const List<double> kCardHeightPhAnchors = <double>[
-  0.0000, 0.0637, 0.1273, 0.1910, 0.2524, 0.3106, 0.3612, 0.4098, 0.4651,
-  0.5228, 0.5827, 0.6465, 0.7161, 0.7734, 0.8366, 0.9136, 1.0000,
+  0.0000, 0.2302, 0.3242, 0.4214, 0.5089, 0.5964, 0.6659, 0.7373, 0.8104,
+  0.8476, 0.8784, 0.9076, 0.9238, 0.9465, 0.9660, 0.9757, 0.9838, 0.9903,
+  0.9968, 0.9968, 0.9984, 1.0000,
 ];
+
+/// 高度锚点自变量：与上面一一对应，= 实测时刻/400（τ，与宽度表 _tau 同一刻度）。
+/// 末段多两个点(0.950 / 1.000)，用于保留「宽度已停、高度还在长」的收尾尾巴。
+const List<double> _kCardHeightTau = <double>[
+  0.000, 0.100, 0.150, 0.200, 0.225, 0.275, 0.300, 0.350, 0.400, 0.450,
+  0.500, 0.525, 0.575, 0.600, 0.700, 0.725, 0.775, 0.825, 0.875, 0.925,
+  0.950, 1.000,
+];
+final _monoHeight = _MonotoneCubic(_kCardHeightTau, kCardHeightPhAnchors);
+/// 高度进度：按**时间**插值（与宽度曲线同刻度、同样的单调三次插值），段间无拐点。
+double _cardHeightPh(double tau) => _monoHeight.eval(tau.clamp(0.0, 1.0));
+/// smoothstep 缓动（3x²-2x³）：两端斜率归零、无拐点，比线性更柔和。
+double _smooth01(double x) {
+  final t = x.clamp(0.0, 1.0);
+  return t * t * (3 - 2 * t);
+}
 /// 卡片透明度：直接跟随卡片宽度进度（pw = g）。
 ///   起点 kCardOpacityStart（卡片宽140）→ 满屏(pw=1,卡片宽349) 1.0，线性映射，
 ///   与卡片宽曲线同一时钟、同形（前段随卡片宽暴涨）。满屏必为 1.0（实底）。
@@ -1336,9 +1408,15 @@ const double kSrcShrinkPow = 1.0;
 /// 原图尺寸缩小 / 复制图交叠窗口收尾的宽度进度（实测 pw=0.703，卡片 287）。
 /// 注意：透明度比它更早归零（见 kSrcFadeEnd），尺寸与复制图仍收到这里。
 const double kSrcGoneProgress = 0.703;
-/// 原图透明度归零（完全透明）对应的卡片宽进度：用户指定 原图 到 00:01.62
-/// （卡273，pw=0.636）即完全透明——比尺寸/复制图终点更早收尾。
-const double kSrcFadeEnd = 0.636;
+/// 原图达峰值（145, ×kSrcLiftPeakScale）对应的卡片宽进度：实测卡187 首次可测帧(00:01.55)。
+const double kSrcPeakG = 0.225;
+/// 原图尺寸缩小收尾（102/140 ≈ 0.729）对应的卡片宽进度：实测卡273（00:01.62）。
+const double kSrcShrinkEnd = 0.636;
+/// 原图收尾尺寸（相对网格 140）：实测最后可见 102 → 102/140 ≈ 0.729。
+const double kSrcEndScale = 0.729;
+/// 原图透明度归零（完全不可见）对应的卡片宽进度：实测 00:01.63 卡287（pw=0.704）。
+/// ——00:01.62 卡273 时原图仍可见(102)，到卡287 才不可见（修正旧的 0.636 误读）。
+const double kSrcFadeEnd = 0.704;
 /// 原图淡出缓动指数：>1 = 前期更实（慢）、临近终点才快速变透（「卡片越大越透、慢慢变淡」）。
 /// 2.0 ≈ 二次 ease-in；越大前期越实、收尾越陡。
 const double kSrcFadePow = 2.0;
@@ -1347,25 +1425,25 @@ const double kSrcFadePow = 2.0;
 ///
 /// Apple 120Hz 实测：从点击（1.51s）到视觉上展开到位（1.91s）≈ 0.4s。
 /// 返回动画一般比打开快，按 0.7 倍取 280ms。
-// ⚠️ 测试减速中：原「当前速度」= 500ms，用户验证完说「恢复到现在的速度」即改回 500。
-const int kOpenDurationMs = 500;
-const int kCloseDurationMs = 500;
-/// 抬升阶段时长（真实毫秒）：封面先从网格原位抬起/放大，之后卡片才展开。
-/// 抬升段时长 = iPhone 录屏实测「抬起」帧：00:01.51→00:01.53 = 20ms（与总时长 400ms 解耦，单独定）。
-/// 可单独调，不影响曲线形状。
-const double kLiftDurationMs = 20.0;
+/// ⚠️ 速度旋钮：想更慢就调大、想更贴近 Apple 就调小。
+/// 刻度关系（重要）：
+///   - Apple 实测整段动作 = **400ms**（卡片 370ms 长满、400ms 收尾）。
+///   - 曲线 _tau / _kCardHeightTau 都是按 **/400 归一化**建的，
+///     所以这里填多少，就等于把 Apple 那 400ms 等比拉伸多少倍。
+///   - 400ms = 与 Apple 逐帧完全一致（原速，可能偏快不好观察）；
+///     650ms ≈ 1.63× 慢放（当前值，便于看清楚宽高的成长过程）；
+///     之前 500ms ≈ 1.25× 慢放，用户反馈「有点太快」。
+/// 打开/关闭保持一致（Apple 的返回也基本等时长）。
+const int kOpenDurationMs = 650;
+const int kCloseDurationMs = 650;
+/// 抬起/落回缓动时长（真实毫秒）：封面抬起 25px + 卡片淡入前导的时间窗。
+/// 取 40ms：实测卡片在 00:01.55（t=40ms）首次可测（卡187），此刻卡片应淡入到 0.2、
+/// 封面抬起到位；关闭末尾用同一窗口平滑落回网格（不再硬掉 25px）。
+/// 注意：它**不影响**卡片宽度轨迹（轨迹由 expRaw=tMs/kOpenDurationMs 决定），
+/// 只控制抬起位移/封面缩放/卡片淡入前导的缓动节奏。
+const double kLiftDurationMs = 40.0;
 
-/// 锚点表线性插值：`anchors[i]` 对应进度 `i / (n-1)`，x ∈ [0,1]。
-double _lerpAnchors(List<double> anchors, double x) {
-  final n = anchors.length - 1;
-  if (x <= 0) return anchors.first;
-  if (x >= 1) return anchors.last;
-  final fx = x * n;
-  final i = fx.floor();
-  if (i >= n) return anchors.last;
-  final f = fx - i;
-  return anchors[i] + (anchors[i + 1] - anchors[i]) * f;
-}
+/// 高度进度改用 _cardHeightPh（单调三次插值，同宽度曲线），见上方定义。
 
 /// Apple Music 风格打开动画路由：用 `PopupRoute` 替代 `PageRouteBuilder(opaque:false)`，
 /// 既保留「旧首页可见 + 卡片扩展 + 封面飞行」效果，又避免 web 下自定义 page route 的 pop 失灵。
@@ -1402,14 +1480,14 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
   ) {
-    // 用与 buildTransitions 相同的 curve 驱动，保证两边读到的进度值一致；
-    // 再用 AnimatedBuilder 包一层，让页面随动画逐帧重建，
-    // 否则 _AlbumHeader 里读到的 reveal.value 永远是首帧的值，封面交接不会发生。
+    // 用与 buildTransitions 相同的 curve 驱动，保证两边读到的进度值一致。
+    // 不再用 AnimatedBuilder 包整页：那样动画期间每帧都会重建整个 _WordListPage
+    // （含 CustomScrollView + 词表 ListView）。120Hz 每帧预算仅 8.3ms，整页每帧
+    // 重建极易超预算 → 就是真机 120Hz 掉帧/不流畅的主因。
+    // 改为页面只建一次；reveal 驱动的局部动画（_AlbumHeader 文案/按钮、返回箭头）
+    // 下沉到各自内部用 AnimatedBuilder / FadeTransition 监听 reveal，视觉完全一致。
     final curved = CurvedAnimation(parent: animation, curve: _kOpenCurve);
-    return AnimatedBuilder(
-      animation: curved,
-      builder: (context, _) => _WordListPage(book: book, reveal: curved),
-    );
+    return _WordListPage(book: book, reveal: curved);
   }
 
   @override
@@ -1436,20 +1514,28 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
         // 复制图淡入起点（比触发点提前 kCopyFadeLead）/ 到原图不可见为止的交叠区间。
         final fadeStart = (triggerG - kCopyFadeLead).clamp(0.0, 1.0);
         final fadeSpan = (kSrcGoneProgress - fadeStart).clamp(0.05, 1.0);
+        // 卡片淡入斜坡结束那一刻的 g。用于让「跟随 g」分支从斜坡收尾处连续接上：
+        // 否则斜坡给 0.85、后续分支给 0.85+0.15·g，交接处要跳 +0.06（卡片"啪"地更实）。
+        final double gAtRampEnd = _kOpenCurve.transform(
+          ((kLiftDurationMs + kCardOpacityRampMs) / kOpenDurationMs)
+              .clamp(0.0, 1.0),
+        );
 
         return AnimatedBuilder(
           animation: animation,
           builder: (context, _) {
-            // ---------- 时间轴：抬升段 → 展开段（两段共用一个控制器）----------
-            // tMs       = 真实毫秒（随 animation.value 线性 0→1）
-            // liftRaw   = 抬升进度 0→1（0→kLiftDurationMs）
-            // expRaw    = 展开进度 0→1（kLiftDurationMs→结束），再经 _kOpenCurve 塑形得 g
+            // ---------- 时间轴 ----------
+            // tMs      = 真实毫秒（随 animation.value 线性 0→1）
+            // liftEase = 抬起缓动（0→kLiftDurationMs）：只控制「抬起位移/封面缩放」，
+            //            与卡片宽度轨迹解耦。
+            // expRaw   = 展开进度 = tMs/kOpenDurationMs（关键修正：不能减 kLiftDurationMs！
+            //            _kOpenCurve 是按 expRaw=tMs/500 逐帧标定的——逐点验算 _tau[i]=
+            //            数据时间/500 完全吻合。减去抬升时间会让卡片宽度全程比 Apple
+            //            慢 ~20px（如 tMs=120 算 267 vs 实测 287），表现为"不跟手/不流畅"）。
             final tMs = animation.value * kOpenDurationMs;
             final liftRaw = (tMs / kLiftDurationMs).clamp(0.0, 1.0);
             final liftEase = Curves.easeOut.transform(liftRaw);
-            final expRaw = (((tMs - kLiftDurationMs) /
-                        (kOpenDurationMs - kLiftDurationMs)))
-                    .clamp(0.0, 1.0);
+            final expRaw = (tMs / kOpenDurationMs).clamp(0.0, 1.0);
             final g = _kOpenCurve.transform(expRaw);
 
             // 动画结束后（animation.value 真正到 1.0）再把页面本体交出去。
@@ -1472,10 +1558,14 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             // 宽进度 pw = g 线性；高进度 ph 按 Apple 实测锚点表插值
             // （高度进度落后于宽度进度 → 先变宽、再变高）。全程连续，绝不跳变。
             final pw = g;
-            final ph = _lerpAnchors(kCardHeightPhAnchors, pw);
+            // 高度按**时间**独立插值（不再 ph=f(pw)）：保留实测里「宽度已停、
+            // 高度还在继续长」的收尾尾巴，卡片收尾不会突然截断。
+            final ph = _cardHeightPh(expRaw);
+            // 抬起偏移乘 liftEase：打开时卡片随 liftEase 平滑抬起（0→liftY），
+            // 关闭末尾 liftEase 1→0 → 卡片平滑落回网格原位（不再硬掉 25px）。
             final cardRect = Rect.fromLTWH(
               originRect.left * (1 - pw),
-              (originRect.top - liftY) * (1 - pw),
+              (originRect.top - liftY * liftEase) * (1 - pw),
               originRect.width + (size.width - originRect.width) * pw,
               originRect.height + (size.height - originRect.height) * ph,
             );
@@ -1493,18 +1583,23 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
               cardOpacityRaw =
                   kCardOpacityRampStart * Curves.easeIn.transform(p);
             } else if (expMs <= kCardOpacityRampMs) {
+              // smoothstep 缓入缓出：斜坡两端斜率归零，不突然"变实"。
               cardOpacityRaw = kCardOpacityRampStart +
                   (kCardOpacityStart - kCardOpacityRampStart) *
-                      (expMs / kCardOpacityRampMs);
+                      _smooth01(expMs / kCardOpacityRampMs);
             } else {
+              // 从斜坡收尾处连续过渡到 1.0（g=1 满屏实底）。
+              final tail =
+                  ((g - gAtRampEnd) / (1.0 - gAtRampEnd)).clamp(0.0, 1.0);
               cardOpacityRaw =
-                  kCardOpacityStart + (1.0 - kCardOpacityStart) * g;
+                  kCardOpacityStart + (1.0 - kCardOpacityStart) * tail;
             }
             final cardOpacity = cardOpacityRaw.clamp(0.0, 1.0);
 
-            // 圆角矩形：前 75% 保持 22，最后 25% 才收方（全程都是圆角矩形）
-            final radiusT = ((g - 0.75) / 0.25).clamp(0.0, 1.0);
-            final cardRadius = 22.0 * (1 - radiusT);
+            // 圆角矩形：起点 12（= 网格卡片圆角，与 g=0 落回网格/起手无缝）→ 22，
+            // 全程保持圆角（符合「动画都是圆角」）；满屏瞬间由真实页面 child 接管，
+            // 角点已落在屏外，无可见跳变。
+            final cardRadius = 12.0 + 10.0 * _smooth01((g / 0.25).clamp(0.0, 1.0));
 
             // ---------- ③ 复制图 = 缩小版整页 ----------
             // 整页按 s = 卡片宽度 / 屏宽 等比缩小，左上角钉在卡片左上角，裁进卡片。
@@ -1515,49 +1610,43 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             //   触发点   原图「稍比复制图更清晰」（u ≈ 0.43）
             //   u=1     原图完全归零（pw = 0.703，卡片 ≈ 屏宽 82%），复制图完全接管
             final u = ((g - fadeStart) / fadeSpan).clamp(0.0, 1.0);
-            final copyFade = u;
-            // 原图透明度 = 卡片宽进度的反函数（用户指定）：卡片越小原图越实，卡片越大越透。
+            // 复制图淡入用 smoothstep（3u²-2u³）：起点0/中点0.5/终点1 与线性一致，
+            // 但两端斜率归零、无拐点，淡入更柔和（更像 Apple 的 ease 淡入），
+            // 不改变起止取值与触发时机。
+            final copyFade = u * u * (3 - 2 * u);
+            // 原图透明度 = 卡片宽进度的反函数：卡片越小原图越实，卡片越大越透。
             // srcFade = 1 - (g / kSrcFadeEnd)^kSrcFadePow：
             //   g=0（卡140，00:01.51）→ 1.0（最实）；卡片越大越透；
-            //   g = kSrcFadeEnd（卡273，00:01.62）→ 0.0（完全透明，此后再不可见）。
-            // 缓动指数 >1：前期更实、临近终点才快速变透（「慢慢变淡」）。
-            // 与复制图 u 时钟解耦——不再共用（那样会让原图跟复制图同步淡入淡出）。
+            //   g = kSrcFadeEnd=0.704（卡287，00:01.63）→ 0.0（完全透明，实测此帧消失）。
+            // 缓动指数 >1：前期更实、临近终点才快速变透（「慢慢变淡」）。与复制图 u 时钟解耦。
             final srcFade = (1.0 -
                     math.pow(g / kSrcFadeEnd, kSrcFadePow).toDouble())
                 .clamp(0.0, 1.0);
 
-            // ---------- ④ 原图缩放（同一张封面贯穿抬升+展开）----------
-            // 抬升段：随 liftEase 从 1.0 放大到峰值 ×1.0357；
-            // 展开段：钉在卡片左上角，从峰值开始随 g 平稳缩小到 0。
-            // 用 inExpand 做软切换（而不是 liftRaw<1.0 硬切），边界处数值天然相等，不会跳。
-            final inExpand = g > 0.0;
-            final double srcScale;
-            if (inExpand) {
-              final t = (g / kSrcGoneProgress).clamp(0.0, 1.0);
-              srcScale = kSrcLiftPeakScale *
-                  math.pow(1.0 - t, kSrcShrinkPow).toDouble();
-            } else {
-              srcScale = 1.0 + (kSrcLiftPeakScale - 1.0) * liftEase;
-            }
+            // ---------- ④ 原图（封面）缩放：原地缩小 + 淡出（Apple 实测 145→102→消失）----------
+            // 位置固定在被点网格原位（抬起 25px），**不跟卡片走**。缩放缓动：
+            //   抬升段 1.0→峰值1.0357（随 liftEase）；展开段峰值→0.729（先慢后快，
+            //   pow1.75 拟合实测 145→140→130→117→102）。绕**自身中心**缩（alignment:center），
+            //   原地「溶解」——不会像 topLeft 锚点那样拽向左上角，消除「左上 vs 中心」视线干扰。
+            final double scaleUp = 1.0 + (kSrcLiftPeakScale - 1.0) * liftEase;
+            final shrinkT =
+                ((g - kSrcPeakG) / (kSrcShrinkEnd - kSrcPeakG)).clamp(0.0, 1.0);
+            final shrinkFactor = 1.0 -
+                (1.0 - kSrcEndScale / kSrcLiftPeakScale) *
+                    math.pow(shrinkT, 1.75);
+            final srcScale = scaleUp * shrinkFactor;
 
             // 旧首页压暗：与卡片透明度同步渐强（去掉 BackdropFilter，真机掉帧）。
             final dimOpacity = cardOpacity;
 
-            // 3) 原图（封面）：贯穿「抬升→展开」的同一张，作为卡片兄弟层、独立透明度。
-            //    - 非展开段（g==0，抬升或关闭末尾回落）：钉在网格原位、向上位移
-            //      liftY*liftEase、放大到峰值，圆角从 12 平滑过渡到 cardRadius。
-            //    - 展开段（g>0）：钉在卡片左上角，随卡片圆角裁切 → 不会飞出卡片。
-            //    关闭动画末尾，liftEase 从 1→0，封面会从 lifted 位置自然落回网格原位，
-            //    不再像之前那样在最后一帧突然下掉 25px。
-            final srcTop = inExpand
-                ? cardRect.top
-                : originRect.top - liftY * liftEase;
-            final srcLeft = inExpand ? cardRect.left : originRect.left;
-            final srcW = inExpand ? cardRect.width : originRect.width;
-            final srcH = inExpand ? cardRect.height : originRect.height;
-            final srcRadius = inExpand
-                ? cardRadius
-                : 12.0 + (cardRadius - 12.0) * liftEase;
+            // 3) 原图（封面）：网格原位（抬起 liftY*liftEase）的 140×140 幽灵，
+            //    绕自身中心缩小 + srcFade 淡出。位置/尺寸固定为网格卡片，不随卡片走；
+            //    圆角保持网格的 12（与落回网格时一致，无跳变）。
+            final srcTop = originRect.top - liftY * liftEase;
+            final srcLeft = originRect.left;
+            final srcW = originRect.width;
+            final srcH = originRect.height;
+            const srcRadius = 12.0;
 
             return Stack(
               children: [
@@ -1647,14 +1736,15 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
                         opacity: srcFade,
                         child: Transform.scale(
                           scale: srcScale,
-                          alignment: Alignment.topLeft,
+                          // 绕中心缩小（原地溶解），而不是 topLeft（会把封面拽向左上角）。
+                          alignment: Alignment.center,
                           child: _coverBoxWidget(
                             book: book,
                             surface: surface,
                             isDark: isDark,
-                            width: originRect.width,
-                            height: originRect.height,
-                            radius: 12.0,
+                            width: srcW,
+                            height: srcH,
+                            radius: srcRadius,
                           ),
                         ),
                       ),
@@ -3194,7 +3284,8 @@ class _AlbumHeader extends StatelessWidget {
     // 卡片渲染的就是整张详情页（_WordListPage）本身，
     // 这张封面是卡片的一部分，必须一直可见；淡入由路由层的 Opacity 统一控制。
     // 若再按 reveal 二次淡入，会变成淡入两次、节奏发闷。
-    final revealValue = reveal?.value ?? 1.0;
+    // reveal 动画对象：文案/按钮的淡入用它做局部 AnimatedBuilder（不重建整页）。
+    final revealAnim = reveal ?? const AlwaysStoppedAnimation(1.0);
 
     return LayoutBuilder(
       builder: (context, c) {
@@ -3223,13 +3314,23 @@ class _AlbumHeader extends StatelessWidget {
               ),
               // 文案/按钮比封面晚一拍淡入（Apple 的错位节奏）：
               // 卡片还小的时候先只看到封面，等长大一些文字才浮出来。
-              Opacity(
-                opacity: ((revealValue - 0.42) / 0.38).clamp(0.0, 1.0),
+              // 用 AnimatedBuilder 只重建透明度这一层（child 整段只建一次），
+              // 让整页（尤其词表 ListView）在动画期间不随 reveal 每帧重建 → 120Hz 流畅。
+              AnimatedBuilder(
+                animation: revealAnim,
+                builder: (context, child) => Opacity(
+                  opacity: ((revealAnim.value - 0.42) / 0.38).clamp(0.0, 1.0),
+                  child: child,
+                ),
                 child: _titleBlockWidget(completed),
               ),
               const SizedBox(height: 20),
-              Opacity(
-                opacity: ((revealValue - 0.52) / 0.34).clamp(0.0, 1.0),
+              AnimatedBuilder(
+                animation: revealAnim,
+                builder: (context, child) => Opacity(
+                  opacity: ((revealAnim.value - 0.52) / 0.34).clamp(0.0, 1.0),
+                  child: child,
+                ),
                 child: _playButton(appleMusicRed, coverW),
               ),
             ],
