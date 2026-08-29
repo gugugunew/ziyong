@@ -28,6 +28,17 @@ class IPhone16ProFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    // 让 App 内容铺满整块屏幕（包括状态栏/灵动岛/Home 指示条区域），
+    // 但把安全边距通过 viewPadding 告诉 App，方便它自己决定哪些元素需要避让。
+    final deviceMedia = mq.copyWith(
+      padding: EdgeInsets.zero,
+      viewPadding: const EdgeInsets.only(
+        top: _statusBarHeight,
+        bottom: _homeIndicatorHeight,
+      ),
+    );
+
     return Container(
       color: const Color(0xFF1C1C1E),
       alignment: Alignment.center,
@@ -59,33 +70,43 @@ class IPhone16ProFrame extends StatelessWidget {
               textDirection: TextDirection.ltr,
               child: Stack(
                 children: [
-                // 屏幕内容
-                Positioned.fill(
-                  child: Column(
-                    children: [
-                      // 状态栏
-                      SizedBox(
-                        height: _statusBarHeight,
-                        child: _StatusBar(isDark: isDark),
-                      ),
-                      // App 内容
-                      Expanded(child: child),
-                      // Home 指示条
-                      SizedBox(
-                        height: _homeIndicatorHeight,
-                        child: _HomeIndicator(isDark: isDark),
-                      ),
-                    ],
+                  // App 内容：铺满全屏，可以延伸到状态栏 / Home 指示条下面
+                  Positioned.fill(
+                    child: MediaQuery(
+                      data: deviceMedia,
+                      child: child,
+                    ),
                   ),
-                ),
-                // 灵动岛
-                const Positioned(
-                  top: 11,
-                  left: 0,
-                  right: 0,
-                  child: _DynamicIsland(),
-                ),
-              ],
+                  // 状态栏（透明背景，浮在内容之上，不拦截点击）
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: _statusBarHeight,
+                    child: IgnorePointer(
+                      child: _StatusBar(isDark: isDark),
+                    ),
+                  ),
+                  // 灵动岛（不拦截点击）
+                  const Positioned(
+                    top: 11,
+                    left: 0,
+                    right: 0,
+                    child: IgnorePointer(
+                      child: _DynamicIsland(),
+                    ),
+                  ),
+                  // Home 指示条（透明背景，浮在内容之上，不拦截点击）
+                  Positioned(
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    height: _homeIndicatorHeight,
+                    child: IgnorePointer(
+                      child: _HomeIndicator(isDark: isDark),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -217,9 +238,7 @@ class _HomeIndicator extends StatelessWidget {
         width: 134,
         height: 5,
         decoration: BoxDecoration(
-          color: isDark
-              ? Colors.white.withValues(alpha: 0.9)
-              : Colors.black.withValues(alpha: 0.85),
+          color: isDark ? Colors.white.withValues(alpha: 0.7) : Colors.black.withValues(alpha: 0.7),
           borderRadius: BorderRadius.circular(2.5),
         ),
       ),

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +13,9 @@ import 'iphone_frame.dart';
 /// true  = `flutter run -d chrome` 直接看到真机框；
 /// false = 用项目原有 iphone16_preview.html + localhost:8090 流程（避免双重套框）。
 const bool kUseDeviceFrame = true;
+
+/// 全局 Navigator key：确保返回按钮精确命中根 Navigator，排除任何嵌套歧义。
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -51,6 +53,7 @@ class MelodyApp extends StatelessWidget {
         final app = MaterialApp(
           title: 'Melody',
           debugShowCheckedModeBanner: false,
+          navigatorKey: appNavigatorKey,
           themeMode: themeController.mode,
           theme: _lightTheme(),
           darkTheme: _darkTheme(),
@@ -232,12 +235,7 @@ class _RootPageState extends State<RootPage> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     final bg = Theme.of(context).scaffoldBackgroundColor;
-    // Web iframe 里 MediaQuery 可能读不到刘海，用 iPhone 16 Pro 的 54pt 兜底
-    final statusHeight = MediaQuery.of(context).padding.top > 0
-        ? MediaQuery.of(context).padding.top
-        : 54.0;
     return Scaffold(
       extendBody: true,
       backgroundColor: bg,
@@ -377,7 +375,9 @@ class GlassTabBar extends StatelessWidget {
               borderRadius: BorderRadius.circular(barRadius + 4),
               child: BackdropFilter(
                 filter: ui.ImageFilter.blur(
-                    sigmaX: blurSigma, sigmaY: blurSigma),
+                  sigmaX: blurSigma,
+                  sigmaY: blurSigma,
+                ),
                 child: Container(color: Colors.transparent),
               ),
             ),
@@ -723,12 +723,14 @@ class _HomePageState extends State<HomePage> {
     // ║  顶部简洁大标题                                                       ║
     // ║  Stepo 固定大标题，无折叠、无滚动渐隐。                              ║
     // ╚══════════════════════════════════════════════════════════════════╝
+    final statusHeight = MediaQuery.of(context).viewPadding.top;
     const titleSize = 30.0;
-    // 外壳状态栏 = 54pt 高，App 内容区起点在屏幕 y=54；灵动岛底部 = top11+height35 = 46。
-    // 标题距灵动岛 20pt → 屏幕 y=66 → 在 App 坐标(y-54)里 = 12。
-    const titleTop = 12.0;
+    // 标题放在状态栏下方 12pt，留出灵动岛/刘海区域；
+    // 内容从 headerHeight 之后开始，确保所有内容都在状态栏下方。
+    const titleGap = 12.0;
+    final titleTop = statusHeight + titleGap;
     final headerHeight = titleTop + titleSize + 10.0;
-    // 顶部边缘柔化遮罩：只覆盖状态栏下方极短区域，往下立刻清晰
+    // 顶部边缘柔化遮罩：覆盖状态栏区域，往下立刻清晰
     final edgeFadeHeight = titleTop;
     return Stack(
       children: [
@@ -1120,14 +1122,16 @@ class _CategoryCardsSection extends StatelessWidget {
                     final book = _books[index];
                     return _CategoryBookCover(
                       book: book,
-                      onTap: () async {
+                      onTap: (rect) async {
                         // 进入词表页期间暂停主页 Banner 自动滚动（性能 + 视觉）
                         _bannerAuto.pause();
-                        await Navigator.of(context).push(
-                          CupertinoPageRoute(
-                            builder: (_) => _WordListPage(book: book),
-                          ),
-                        );
+                        // 只传源卡片矩形。终点矩形**不在这里算** ——
+                        // 这里拿到的 MediaQuery.size 可能是整个浏览器窗口的尺寸
+                        // （iPhone 外壳下 MaterialApp 继承的 MediaQuery 不可靠），
+                        // 算出来的终点会飞到屏幕外面。终点由页面自身布局决定，
+                        // 路由层则用 LayoutBuilder 拿真实尺寸来缩放。
+                        await Navigator.of(context)
+                            .push(_appleOpenRoute(book, rect));
                         // pop 后恢复（无副作用：仅通知 Banner 监听者）
                         _bannerAuto.resume();
                       },
@@ -1146,15 +1150,41 @@ class _CategoryCardsSection extends StatelessWidget {
 // 单个词书封面：固定 104×138，完整展示图片，底部带柔和书影，可点击进入词表
 class _CategoryBookCover extends StatelessWidget {
   final _WordBook book;
-  final VoidCallback onTap;
-  const _CategoryBookCover({required this.book, required this.onTap});
+  final ValueChanged<Rect> onTap;
+  final GlobalKey _key = GlobalKey();
+
+  _CategoryBookCover({required this.book, required this.onTap});
+
+  /// 取当前封面的真实坐标，作为打开路由的「生长起点」。
+  ///
+  /// 关键：路由的飞行层是画在 `Overlay` 里的，而 Overlay 被 iPhone 外壳的
+  /// 边框（bezel）与居中偏移过，它有自己的局部坐标系。若直接用
+  /// `localToGlobal`（相对整个窗口）当 Overlay 内坐标，封面会整体偏一段，
+  /// 看起来就是「图片出现在别的地方」。必须转成 Overlay 局部坐标。
+  Rect _originRect(BuildContext context) {
+    final box = _key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return Rect.zero;
+    final globalTopLeft = box.localToGlobal(Offset.zero);
+
+    try {
+      final overlay = Overlay.of(context, rootOverlay: true);
+      final overlayBox = overlay.context.findRenderObject() as RenderBox?;
+      if (overlayBox != null && overlayBox.attached) {
+        return overlayBox.globalToLocal(globalTopLeft) & box.size;
+      }
+    } catch (_) {
+      // 取不到 Overlay（极少见）时退回全局坐标
+    }
+    return globalTopLeft & box.size;
+  }
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: onTap,
+      onTap: () => onTap(_originRect(context)),
       child: Container(
+        key: _key,
         width: _CategoryCardsSection._cardW,
         height: _CategoryCardsSection._cardH,
         alignment: Alignment.center,
@@ -1187,9 +1217,10 @@ class _CategoryBookCover extends StatelessWidget {
                 ),
               ),
             ),
-            // 书封图片：完整显示上传的原图（BoxFit.contain 不裁剪），加 surface 背景让留白不突兀
+            // 书封图片：完整显示上传的原图。打开时由路由的「飞行层」（非 Hero）从
+            // 此位置起飞，圆角 12 → 详情页 20 平滑插值，达成规格「共享元素 + 圆角过渡」。
             ClipRRect(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(12),
               child: Container(
                 width: _CategoryCardsSection._cardW,
                 height: _CategoryCardsSection._cardH,
@@ -1217,6 +1248,261 @@ class _CategoryBookCover extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 展开几何曲线。
+///
+/// 注意：这里**不能**用 `Cubic(0.32, 0.72, 0, 1)` 那种严重前置的曲线 ——
+/// 它会在 30% 的时间里跑完约 77% 的进度，卡片一上来就变得又宽又实，
+/// 与 Apple「先小、后绽开」的观感完全相反（就是之前"太宽了"的根因）。
+///
+/// 同理，几何进度算出来之后**不要再叠一层 easeOutCubic**：
+/// easeOutCubic 自己也是前置的（t=0.5 就走完 87.5%），叠上去等于前置两次。
+/// 这里用一条平滑对称的 easeInOut 当唯一的几何时钟，尺寸再线性跟随它。
+const Curve _kOpenCurve = Curves.easeInOut;
+
+/// 「复制的图片」浮现时机，用**终点尺寸占比**定义（从 Apple 逐帧量出来的）：
+/// 那一刻卡片（框框）的宽 = 终点满屏宽的 68%，高 = 终点满屏高的 55%。
+/// 写成占比而不是写死进度值，换设备 / 换卡片宽高比都能自动适配。
+const double kCopyTriggerWidthRatio = 0.68;
+const double kCopyTriggerHeightRatio = 0.55;
+/// 复制图淡入 / 原图淡出共用的窗口长度（占整段动画的比例）。
+const double kCopyFadeSpan = 0.20;
+/// 原图相对复制图的基础透明度折扣：原图要「稍微比复制图低一些」。
+const double kSrcOpacityBias = 0.78;
+
+/// Apple Music 风格打开动画路由：用 `PopupRoute` 替代 `PageRouteBuilder(opaque:false)`，
+/// 既保留「旧首页可见 + 卡片扩展 + 封面飞行」效果，又避免 web 下自定义 page route 的 pop 失灵。
+class _AppleOpenRoute<T> extends PopupRoute<T> {
+  final _WordBook book;
+  final Rect originRect;
+
+  _AppleOpenRoute({required this.book, required this.originRect});
+
+  @override
+  Color? get barrierColor => Colors.transparent;
+
+  @override
+  bool get barrierDismissible => false;
+
+  @override
+  String? get barrierLabel => null;
+
+  /// 必须为 false：否则 Navigator 不会绘制下层路由，旧首页就看不见了。
+  @override
+  bool get opaque => false;
+
+  @override
+  // 测试阶段放慢到 2.5s，方便逐帧截图对比；调优完成后可改回 780ms。
+  Duration get transitionDuration => const Duration(milliseconds: 2500);
+
+  @override
+  Duration get reverseTransitionDuration => const Duration(milliseconds: 2000);
+
+  @override
+  Widget buildPage(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+  ) {
+    // 用与 buildTransitions 相同的 curve 驱动，保证两边读到的进度值一致；
+    // 再用 AnimatedBuilder 包一层，让页面随动画逐帧重建，
+    // 否则 _AlbumHeader 里读到的 reveal.value 永远是首帧的值，封面交接不会发生。
+    final curved = CurvedAnimation(parent: animation, curve: _kOpenCurve);
+    return AnimatedBuilder(
+      animation: curved,
+      builder: (context, _) => _WordListPage(book: book, reveal: curved),
+    );
+  }
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final geo = CurvedAnimation(parent: animation, curve: _kOpenCurve);
+
+    // 关键：用 LayoutBuilder 拿**真实布局尺寸**，不要用 MediaQuery.of(context).size。
+    // iPhone 外壳下 MaterialApp 继承的 MediaQuery 可能是整个浏览器窗口的尺寸，
+    // 用它当满屏尺寸会让 100% 时的卡片比可见区域大得多 → 直接飞到屏幕外面，
+    // 而 g=1 时又切成真实的 child → 就是你看到的那一下「跳变」。
+    return LayoutBuilder(
+      builder: (context, c) {
+        final mqSize = MediaQuery.of(context).size;
+        final size = Size(
+          c.maxWidth.isFinite ? c.maxWidth : mqSize.width,
+          c.maxHeight.isFinite ? c.maxHeight : mqSize.height,
+        );
+        return AnimatedBuilder(
+          animation: geo,
+          builder: (context, _) {
+            final g = geo.value;
+            // 动画结束后直接把页面本体交出去：
+            // 省掉 BackdropFilter 模糊层，否则列表滚动时一直挂着全屏模糊，掉帧。
+            if (g >= 1.0) return child;
+
+            final isDark = Theme.of(context).brightness == Brightness.dark;
+            final surface = isDark ? const Color(0xFF1C1C1E) : Colors.white;
+            // 压暗层调浅，让旧首页能透出来（深色主题下尤其明显）
+            final dimColor = isDark
+                ? const Color(0xFF000000).withValues(alpha: 0.30)
+                : Colors.white.withValues(alpha: 0.35);
+
+            // ---------- ① 卡片几何：源卡片 → 满屏 ----------
+            // 起点就是被点那张卡片本身（位置/宽高一致），终点满屏。
+            // 宽用线性插值 pw = g；高用 ph = g^p —— 指数 p 由「触发点同时满足
+            // 终点宽的 68% / 终点高的 55%」反解出来，全程连续，绝不会跳变。
+            final triggerG = ((kCopyTriggerWidthRatio * size.width -
+                        originRect.width) /
+                    (size.width - originRect.width))
+                .clamp(0.001, 0.999);
+            final triggerH = ((kCopyTriggerHeightRatio * size.height -
+                        originRect.height) /
+                    (size.height - originRect.height))
+                .clamp(0.001, 0.999);
+            // ph(g) = g^p，令 ph(triggerG) == triggerH → p = ln(triggerH)/ln(triggerG)
+            final hPow =
+                (math.log(triggerH) / math.log(triggerG)).clamp(0.4, 3.0);
+            final pw = g;
+            final ph = math.pow(g, hPow).toDouble();
+            final cardRect = Rect.fromLTWH(
+              originRect.left * (1 - pw),
+              originRect.top * (1 - pw),
+              originRect.width + (size.width - originRect.width) * pw,
+              originRect.height + (size.height - originRect.height) * ph,
+            );
+
+            // ---------- ② 透明度由卡片尺寸驱动 ----------
+            // 满屏 = 100% 不透明，全程连续。
+            final fill = pw;
+            final cardOpacity = (0.25 + 0.75 * fill).clamp(0.0, 1.0);
+
+            // 圆角矩形：前 75% 保持 22，最后 25% 才收方（全程都是圆角矩形）
+            final radiusT = ((g - 0.75) / 0.25).clamp(0.0, 1.0);
+            final cardRadius = 22.0 * (1 - radiusT);
+
+            // ---------- ③ 复制图 = 缩小版整页 ----------
+            // 整页按 s = 卡片宽度 / 屏宽 等比缩小，左上角钉在卡片左上角，裁进卡片。
+            // g=1 时 s=1、卡片=满屏，内容正好等于页面本体 —— 终点不需要换图。
+            final s = (cardRect.width / size.width).clamp(0.0, 1.0);
+            // 交叠进度 u：0 = 还没到触发点，1 = 复制图完全接管。
+            final u = ((g - triggerG) / kCopyFadeSpan).clamp(0.0, 1.0);
+            final copyFade = u;
+            // 原图：三次方快速退场 + 基础折扣，保证「复制图的透明度比原图高一些」。
+            // u≈0.29 之后复制图就一定压过原图，且全程连续无跳变。
+            final srcFade = kSrcOpacityBias * math.pow(1 - u, 3);
+
+            // ---------- ④ 原图：钉在卡片左上角，保持原始尺寸 ----------
+            // 不飞、不缩放：它就是被点那张封面，跟着卡片左上角一起被顶上去。
+            final srcRect = Rect.fromLTWH(
+              cardRect.left,
+              cardRect.top,
+              originRect.width,
+              originRect.height,
+            );
+
+            // 旧首页压暗/模糊：与卡片填充度同步渐强
+            final dimOpacity = fill;
+
+            return Stack(
+              children: [
+                // 1) 旧首页保持可见，被遮罩 + 模糊压暗（纯视觉，不拦截点击）
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: Opacity(
+                      opacity: dimOpacity,
+                      child: BackdropFilter(
+                        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                        child: Container(color: dimColor),
+                      ),
+                    ),
+                  ),
+                ),
+
+                // 2) 卡片：白底圆角背景（一直有） + 里面的缩小版整页（复制图）。
+                //    Container 负责白底/圆角/阴影/裁剪；内层 Opacity(copyFade) 控制
+                //    「复制的图片」什么时候浮现，OverflowBox + Transform.scale(topLeft)
+                //    把整页等比缩到 s 倍、左上角对齐卡片左上角，裁进卡片里。
+                //    g=1 时 s=1、卡片=满屏，内容就是页面本体 —— 终点不用换图。
+                Positioned(
+                  left: cardRect.left,
+                  top: cardRect.top,
+                  width: cardRect.width,
+                  height: cardRect.height,
+                  child: IgnorePointer(
+                    ignoring: g < 0.999,
+                    child: Opacity(
+                      opacity: cardOpacity,
+                      child: Container(
+                        clipBehavior: Clip.antiAlias,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(cardRadius),
+                          color: surface,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(
+                                alpha: isDark ? 0.50 : 0.18,
+                              ),
+                              blurRadius: 30,
+                              spreadRadius: 2,
+                              offset: const Offset(0, 12),
+                            ),
+                          ],
+                        ),
+                        child: Opacity(
+                          opacity: copyFade,
+                          child: OverflowBox(
+                            alignment: Alignment.topLeft,
+                            minWidth: size.width,
+                            maxWidth: size.width,
+                            minHeight: size.height,
+                            maxHeight: size.height,
+                            child: Transform.scale(
+                              scale: s,
+                              alignment: Alignment.topLeft,
+                              child: child,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+                // 3) 原图：钉在卡片左上角，保持原始尺寸，不飞不缩放；
+                //    透明度 = 卡片透明度 × 淡出系数，与外框同步变实/变虚。
+                Positioned(
+                  left: srcRect.left,
+                  top: srcRect.top,
+                  width: srcRect.width,
+                  height: srcRect.height,
+                  child: IgnorePointer(
+                    child: Opacity(
+                      opacity: (cardOpacity * srcFade).clamp(0.0, 1.0),
+                      child: _coverBoxWidget(
+                        book: book,
+                        surface: surface,
+                        isDark: isDark,
+                        width: srcRect.width,
+                        height: srcRect.height,
+                        radius: 12.0,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+Route<dynamic> _appleOpenRoute(_WordBook book, Rect originRect) {
+  return _AppleOpenRoute<dynamic>(book: book, originRect: originRect);
 }
 
 // 类别顶部横向滚动大横幅（Apple Music Essentials 风格）
@@ -1539,108 +1825,6 @@ class _BannerCard {
     required this.bgColor,
     this.imageAsset,
   });
-}
-
-// 单词类别下的书籍卡片（Apple Books 封面占位）
-class _CategoryBookCards extends StatelessWidget {
-  const _CategoryBookCards();
-
-  @override
-  Widget build(BuildContext context) {
-    final textColor = Theme.of(context).colorScheme.onSurface;
-    final books = [
-      (
-        'The Midnight Library',
-        'Matt Haig',
-        const Color(0xFF3A4A6B),
-        const Color(0xFFD8E0F0),
-      ),
-      (
-        'Tomorrow, and Tomorrow, and Tomorrow',
-        'Gabrielle Zevin',
-        const Color(0xFF4A4A4A),
-        const Color(0xFFE8E8E8),
-      ),
-      (
-        'Lessons in Chemistry',
-        'Bonnie Garmus',
-        const Color(0xFF7B5E4E),
-        const Color(0xFFF0E6DF),
-      ),
-    ];
-    return SizedBox(
-      height: 200,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
-        itemCount: books.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 12),
-        itemBuilder: (context, index) {
-          final (title, author, coverColor, _) = books[index];
-          return SizedBox(
-            width: 115,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 115,
-                  height: 152,
-                  decoration: BoxDecoration(
-                    color: coverColor,
-                    borderRadius: BorderRadius.circular(10),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.08),
-                        blurRadius: 8,
-                        offset: const Offset(0, 3),
-                      ),
-                    ],
-                  ),
-                  padding: const EdgeInsets.all(12),
-                  alignment: Alignment.bottomLeft,
-                  child: Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      height: 1.15,
-                      letterSpacing: -0.3,
-                    ),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  title,
-                  style: TextStyle(
-                    color: textColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.2,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  author,
-                  style: TextStyle(
-                    color: textColor.withValues(alpha: 0.45),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w400,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
 }
 
 // 书籍列表区块：标题 + 副标题 + 横向滚动书籍封面
@@ -2191,19 +2375,96 @@ class Word {
 /// 用户学习数据库（mock）：实际应持久化到 SharedPreferences/SQLite。
 /// 预置 90 个词已学，演示 "90 / 100" 完成度；其中 one..ten 这 10 个数字词模拟未背诵。
 const Set<String> _userLearnedWords = {
-  'apple', 'banana', 'cat', 'dog', 'book', 'pen', 'pencil',
-  'red', 'blue', 'green', 'yellow', 'teacher', 'student',
-  'school', 'classroom', 'friend', 'family', 'father',
-  'mother', 'brother', 'sister', 'happy', 'sad', 'big', 'small',
-  'eat', 'drink', 'run', 'jump', 'sing', 'dance', 'read', 'write',
-  'water', 'milk', 'rice', 'egg', 'fish', 'bird', 'tree', 'flower',
-  'sun', 'moon', 'star', 'hand', 'foot', 'head', 'eye', 'ear',
-  'nose', 'mouth', 'hello', 'goodbye', 'yes', 'no', 'open', 'close',
-  'come', 'go', 'play', 'sleep', 'morning', 'evening', 'name',
-  'boy', 'girl', 'man', 'woman', 'baby', 'car', 'bus', 'bike',
-  'train', 'plane', 'ball', 'kite', 'bag', 'box', 'cup', 'chair',
-  'desk', 'door', 'window', 'bed', 'room', 'home', 'time', 'day',
-  'week', 'year',
+  'apple',
+  'banana',
+  'cat',
+  'dog',
+  'book',
+  'pen',
+  'pencil',
+  'red',
+  'blue',
+  'green',
+  'yellow',
+  'teacher',
+  'student',
+  'school',
+  'classroom',
+  'friend',
+  'family',
+  'father',
+  'mother',
+  'brother',
+  'sister',
+  'happy',
+  'sad',
+  'big',
+  'small',
+  'eat',
+  'drink',
+  'run',
+  'jump',
+  'sing',
+  'dance',
+  'read',
+  'write',
+  'water',
+  'milk',
+  'rice',
+  'egg',
+  'fish',
+  'bird',
+  'tree',
+  'flower',
+  'sun',
+  'moon',
+  'star',
+  'hand',
+  'foot',
+  'head',
+  'eye',
+  'ear',
+  'nose',
+  'mouth',
+  'hello',
+  'goodbye',
+  'yes',
+  'no',
+  'open',
+  'close',
+  'come',
+  'go',
+  'play',
+  'sleep',
+  'morning',
+  'evening',
+  'name',
+  'boy',
+  'girl',
+  'man',
+  'woman',
+  'baby',
+  'car',
+  'bus',
+  'bike',
+  'train',
+  'plane',
+  'ball',
+  'kite',
+  'bag',
+  'box',
+  'cup',
+  'chair',
+  'desk',
+  'door',
+  'window',
+  'bed',
+  'room',
+  'home',
+  'time',
+  'day',
+  'week',
+  'year',
 };
 
 /// 主页 Banner 自动滚动控制器：进入词表页时 pause，pop 后 resume。
@@ -2341,35 +2602,36 @@ const List<Word> xiaoxueWords = [
 /// 词表页（Apple Music 专辑详情风格）：大封面 + 信息 + 操作按钮 + 分段 Tab + 增量加载词表
 class _WordListPage extends StatefulWidget {
   final _WordBook book;
-  const _WordListPage({required this.book});
+
+  /// 打开/返回路由 reveal 动画（0→1 打开，1→0 返回），仅用于返回按钮末尾淡入。
+  final Animation<double>? reveal;
+  const _WordListPage({required this.book, this.reveal});
 
   @override
   State<_WordListPage> createState() => _WordListPageState();
 }
 
 class _WordListPageState extends State<_WordListPage> {
-  final TextEditingController _searchCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
   final Set<String> _favorites = <String>{};
 
   int _selectedTab = 0; // 0 单词 / 1 已收藏 / 2 相关
   int _visibleCount = _kInitialBatch;
   bool _isShuffled = false;
-  List<int> _shuffleOrder = const [];
+  final List<int> _shuffleOrder = const [];
   bool _loadingMore = false;
   bool _showUnlearnedOnly = false; // 点击副标题 chevron 后只显示未学
   bool _isInShelf = false; // 是否已加入书架列表（未来接 SharedPreferences 持久化）
 
   // 首屏只预备 10 个单词（iPhone 16 Pro 可视区约 8-10 行，10 个够首屏显示），
-  // 往下滑到接近底部再增量加载下一批 —— 首帧轻，push 动画不被拖垮。
+  // 往下滑到接近底部再增量加载下一批。
   static const int _kInitialBatch = 10;
   static const int _kBatchSize = 20;
 
   /// 用户已学单词数（与本词本交集）。
   /// 实际应读取持久化的 _userLearnedWords 全集；这里 mock 一组 25 词。
-  int get _learnedCount => widget.book.words
-      .where((w) => _userLearnedWords.contains(w.text))
-      .length;
+  int get _learnedCount =>
+      widget.book.words.where((w) => _userLearnedWords.contains(w.text)).length;
 
   List<Word> get _orderedWords {
     if (_isShuffled && _shuffleOrder.length == widget.book.words.length) {
@@ -2387,14 +2649,9 @@ class _WordListPageState extends State<_WordListPage> {
     }
     // 点击副标题 chevron 后：过滤掉已学单词
     if (_showUnlearnedOnly) {
-      base =
-          base.where((w) => !_userLearnedWords.contains(w.text)).toList();
+      base = base.where((w) => !_userLearnedWords.contains(w.text)).toList();
     }
-    final q = _searchCtrl.text.trim().toLowerCase();
-    if (q.isEmpty) return base;
-    return base
-        .where((w) => w.text.toLowerCase().contains(q))
-        .toList();
+    return base;
   }
 
   List<Word> get _displayed => _filtered.take(_visibleCount).toList();
@@ -2410,7 +2667,6 @@ class _WordListPageState extends State<_WordListPage> {
   @override
   void dispose() {
     _scrollCtrl.dispose();
-    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -2431,12 +2687,6 @@ class _WordListPageState extends State<_WordListPage> {
         if (mounted) _loadingMore = false;
       });
     }
-  }
-
-  void _onSearchChanged() {
-    setState(() {
-      _visibleCount = _kInitialBatch.clamp(0, _filtered.length);
-    });
   }
 
   void _toggleFavorite(Word w) {
@@ -2463,7 +2713,6 @@ class _WordListPageState extends State<_WordListPage> {
   }
 
   void _startLearning() {
-    _searchCtrl.clear();
     setState(() {
       _selectedTab = 0;
       _isShuffled = false;
@@ -2487,98 +2736,63 @@ class _WordListPageState extends State<_WordListPage> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final textColor = Theme.of(context).colorScheme.onSurface;
-    final bg = isDark ? const Color(0xFF010101) : const Color(0xFFFFFFFF);
     final surface = isDark ? const Color(0xFF1C1C1E) : Colors.white;
     final sub = textColor.withValues(alpha: 0.5);
-    final statusHeight = MediaQuery.of(context).padding.top;
-    final gapCoverButtons = MediaQuery.of(context).size.height * 0.032;
-    // 粘性头部高度 = 状态栏 + 10(上内边距) + 38(NavBar) + 34(间距) + 128(封面) + gapCoverButtons + 32(按钮) + 14(间距) + 56(搜索框)
-    final headerHeight = statusHeight +
-        10 +
-        38 +
-        34 +
-        128 +
-        gapCoverButtons +
-        32 +
-        14 +
-        56;
-
-    final panelColor = isDark
-        ? const Color(0xFF1C1C1E).withValues(alpha: 0.75)
-        : Colors.white.withValues(alpha: 0.60);
+    final statusHeight = MediaQuery.of(context).viewPadding.top;
+    final reveal = widget.reveal ?? const AlwaysStoppedAnimation(1.0);
+    final arrowReveal = CurvedAnimation(
+      parent: reveal,
+      curve: const Interval(0.85, 1.0),
+    );
 
     return Scaffold(
-      backgroundColor: bg,
+      // 背景用 surface（白/深色），不要透明：
+      // 现在卡片 = 缩放版整页，页面背景本身就是卡片背景；
+      // 动画期间由路由层的 Container Opacity 控制整体透明度，
+      // 动画结束后直接返回 child，背景必须是不透明的，否则会透出旧首页。
+      backgroundColor: surface,
       body: Stack(
         children: [
-          // 底层：列表从 y=0 开始绘制，先留出 header 高度避免首屏被挡住
+          // 滚动内容：封面 + 标题/进度 + 播放按钮 + 词表（封面随内容上滑，像 Apple Music）
           CustomScrollView(
             controller: _scrollCtrl,
             physics: const BouncingScrollPhysics(),
             slivers: [
-              SliverToBoxAdapter(child: SizedBox(height: headerHeight)),
+              SliverToBoxAdapter(
+                child: _AlbumHeader(
+                  book: widget.book,
+                  isDark: isDark,
+                  textColor: textColor,
+                  sub: sub,
+                  surface: surface,
+                  favoriteCount: _favorites.length,
+                  learnedCount: _learnedCount,
+                  onToggleUnlearned: _toggleUnlearnedOnly,
+                  onStart: _startLearning,
+                  onAddToShelf: _addToShelf,
+                  isInShelf: _isInShelf,
+                  reveal: reveal,
+                ),
+              ),
               ..._buildBody(textColor: textColor, sub: sub, surface: surface),
             ],
           ),
-          // 顶层：固定磨砂玻璃头部（浮在列表上方，列表项会从后面滑过并被模糊）
-          // 从 y=0 起、左右贴边 → 整条（含灵动岛/状态栏区域）都是毛玻璃
+          // 顶部导航条：透明底，返回箭头末尾淡入
           Positioned(
             top: 0,
             left: 0,
             right: 0,
-            child: Stack(
-              children: [
-                // 模糊层外扩 8pt，避免边缘被裁剪产生暗边/阴影
-                Positioned(
-                  top: -8,
-                  left: -8,
-                  right: -8,
-                  bottom: -8,
-                  child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-                    child: Container(color: Colors.transparent),
-                  ),
+            child: Container(
+              color: Colors.transparent,
+              padding: EdgeInsets.fromLTRB(16, statusHeight + 10, 16, 10),
+              child: FadeTransition(
+                opacity: arrowReveal,
+                child: _NavBar(
+                  textColor: textColor,
+                  isDark: isDark,
+                  onBack: () => appNavigatorKey.currentState?.pop(),
                 ),
-                // 可见磨砂面板：无底部边框，避免那条黑带
-                Container(
-                  color: panelColor,
-                  child: SafeArea(
-                    top: true,
-                    bottom: false,
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _NavBar(textColor: textColor, isDark: isDark),
-                          const SizedBox(height: 34),
-                          _AlbumHeader(
-                            book: widget.book,
-                            isDark: isDark,
-                            textColor: textColor,
-                            sub: sub,
-                            surface: surface,
-                            favoriteCount: _favorites.length,
-                            learnedCount: _learnedCount,
-                            onToggleUnlearned: _toggleUnlearnedOnly,
-                            onStart: _startLearning,
-                            onAddToShelf: _addToShelf,
-                            isInShelf: _isInShelf,
-                          ),
-                          const SizedBox(height: 14),
-                          _SearchBar(
-                            controller: _searchCtrl,
-                            surface: surface,
-                            sub: sub,
-                            textColor: textColor,
-                            onChanged: _onSearchChanged,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         ],
@@ -2647,37 +2861,123 @@ class _WordListPageState extends State<_WordListPage> {
   }
 }
 
-// 顶部导航：只保留返回按钮（iOS 风细线条箭头，和底部导航图标设计语言统一）
+// 顶部导航：Apple 同款左右圆形描边按钮（透明底 + 1px 描边，无磨砂填充）
 class _NavBar extends StatelessWidget {
   final Color textColor;
   final bool isDark;
-  const _NavBar({required this.textColor, required this.isDark});
+  final VoidCallback onBack;
+  const _NavBar({
+    required this.textColor,
+    required this.isDark,
+    required this.onBack,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final bg = isDark
-        ? Colors.white.withValues(alpha: 0.12)
-        : Colors.black.withValues(alpha: 0.06);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => Navigator.of(context).pop(),
-      child: Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Icon(
-          Icons.arrow_back_ios_new,
-          size: 18,
-          color: textColor,
-        ),
+    // Apple 同款：透明底 + 1px 描边圆按钮（无磨砂填充），干净利落
+    final border = isDark
+        ? Colors.white.withValues(alpha: 0.35)
+        : Colors.black.withValues(alpha: 0.22);
+    Widget circle(IconData icon) => Container(
+      width: 30,
+      height: 30,
+      decoration: BoxDecoration(
+        color: Colors.transparent,
+        border: Border.all(color: border, width: 0.8),
+        borderRadius: BorderRadius.circular(999),
       ),
+      child: Center(child: Icon(icon, size: 15, color: textColor)),
+    );
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onBack,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Center(child: circle(Icons.arrow_back_ios_new)),
+          ),
+        ),
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            // TODO: 分享/导出词本
+          },
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Center(child: circle(Icons.ios_share_outlined)),
+          ),
+        ),
+      ],
     );
   }
 }
 
-// 大封面 + 标题/进度 + 操作按钮（Apple Music 专辑头部）
+// Apple Music 式吸顶折叠头部：
+// 展开 = 居中大封面 + 标题/进度 + 红色播放键；
+// 下滚时折叠成顶部小条（迷你封面 + 标题）始终吸顶可见。
+// 关键：封面永远在屏幕内，因此无论滚到第几个词再返回，
+// Hero 飞回起点的矩形都在屏内，彻底消除「从屏幕外飞来」的 bug。
+// 专辑页头部：居中大封面 + 居中标题/元信息 + 宽大红色播放按钮
+// 纯色背景，不吸顶（封面随内容上滑，像 Apple Music）。
+/// 封面盒子：详情页大封面与「深滚返回」时的克隆封面共用，
+/// 保证 Hero 飞行两端视觉一致（圆角 / 阴影 / 图片）。
+Widget _coverBoxWidget({
+  required _WordBook book,
+  required Color surface,
+  required bool isDark,
+  required double width,
+  required double height,
+  double radius = 20,
+}) {
+  return Container(
+    width: width,
+    height: height,
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(radius),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.16),
+          blurRadius: 18,
+          spreadRadius: 0,
+          offset: const Offset(0, 9),
+        ),
+        BoxShadow(
+          color: Colors.black.withValues(alpha: isDark ? 0.20 : 0.08),
+          blurRadius: 6,
+          spreadRadius: -1,
+          offset: const Offset(0, 4),
+        ),
+      ],
+    ),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: Container(
+        color: surface,
+        alignment: Alignment.center,
+        child: Image.asset(
+          book.cover,
+          fit: BoxFit.contain,
+          cacheWidth: 520,
+          frameBuilder: (context, child, frame, sync) {
+            if (sync) return child;
+            return AnimatedOpacity(
+              opacity: frame == null ? 0 : 1,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+              child: child,
+            );
+          },
+          errorBuilder: (_, _, _) => Container(color: surface),
+        ),
+      ),
+    ),
+  );
+}
+
 class _AlbumHeader extends StatelessWidget {
   final _WordBook book;
   final bool isDark;
@@ -2691,6 +2991,11 @@ class _AlbumHeader extends StatelessWidget {
   final VoidCallback onAddToShelf;
   final bool isInShelf;
 
+  /// 飞行层终点矩形。若不为 null，封面位置和大小必须与飞行层终点完全对齐，
+  /// 且封面在 reveal < 1 时隐藏，等飞行层淡出后才显示，避免重影。
+  /// 打开/返回路由 reveal 动画。
+  final Animation<double>? reveal;
+
   const _AlbumHeader({
     required this.book,
     required this.isDark,
@@ -2703,147 +3008,147 @@ class _AlbumHeader extends StatelessWidget {
     required this.onStart,
     required this.onAddToShelf,
     required this.isInShelf,
+    this.reveal,
   });
 
   @override
   Widget build(BuildContext context) {
     final completed = learnedCount >= book.words.length;
-    const accent = Color(0xFF34C759); // Apple 系统绿
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 封面：解码后淡入（不做 Hero 飞行，保证 push/pop 是纯 Apple 左右滑动）
-            Container(
-              width: 128,
-              height: 128,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(6),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: isDark ? 0.45 : 0.18),
-                    blurRadius: 10,
-                    spreadRadius: -1,
-                    offset: const Offset(0, 5),
-                  ),
-                ],
+    const appleMusicRed = Color(0xFFFA233B);
+    // 关键：用 LayoutBuilder 拿**真实布局宽度**，不要用 MediaQuery.of(context).size。
+    // iPhone 外壳下 MaterialApp 继承的 MediaQuery 可能是整个浏览器窗口的尺寸，
+    // 用它算封面宽度/位置会偏到屏幕外面去。
+    final top = MediaQuery.of(context).viewPadding.top + 20.0;
+    // 注意：这里**不要**再按 reveal 进度隐藏封面。
+    // 卡片渲染的就是整张详情页（_WordListPage）本身，
+    // 这张封面是卡片的一部分，必须一直可见；淡入由路由层的 Opacity 统一控制。
+    // 若再按 reveal 二次淡入，会变成淡入两次、节奏发闷。
+    final revealValue = reveal?.value ?? 1.0;
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        final mqW = MediaQuery.of(context).size.width;
+        final availW = c.maxWidth.isFinite ? c.maxWidth : mqW;
+        // 封面保持与网格卡片一致的竖向比例（_cardW : _cardH），避免拉伸。
+        const cardRatio =
+            _CategoryCardsSection._cardW / _CategoryCardsSection._cardH; // w/h
+        final coverW = (availW * 0.40).clamp(150.0, 220.0);
+        final coverH = coverW / cardRatio;
+
+        return Padding(
+          padding: EdgeInsets.only(top: top),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _coverBoxWidget(
+                book: book,
+                surface: surface,
+                isDark: isDark,
+                width: coverW,
+                height: coverH,
               ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                child: Container(
-                  color: surface,
-                  alignment: Alignment.center,
-                  child: Image.asset(
-                    book.cover,
-                    fit: BoxFit.contain,
-                    cacheWidth: 320,
-                    frameBuilder: (context, child, frame, sync) {
-                      if (sync) return child;
-                      return AnimatedOpacity(
-                        opacity: frame == null ? 0 : 1,
-                        duration: const Duration(milliseconds: 200),
-                        curve: Curves.easeOut,
-                        child: child,
-                      );
-                    },
-                    errorBuilder: (_, _, _) => Container(color: surface),
+              // 文案/按钮比封面晚一拍淡入（Apple 的错位节奏）：
+              // 卡片还小的时候先只看到封面，等长大一些文字才浮出来。
+              Opacity(
+                opacity: ((revealValue - 0.42) / 0.38).clamp(0.0, 1.0),
+                child: _titleBlockWidget(completed),
+              ),
+              const SizedBox(height: 20),
+              Opacity(
+                opacity: ((revealValue - 0.52) / 0.34).clamp(0.0, 1.0),
+                child: _playButton(appleMusicRed, coverW),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _titleBlockWidget(bool completed) {
+    const accent = Color(0xFF34C759);
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Text(
+            book.title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 23,
+              fontWeight: FontWeight.w700,
+              color: textColor,
+              letterSpacing: -0.4,
+              height: 1.15,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (completed)
+          Text(
+            '100/100',
+            style: TextStyle(
+              fontSize: 15,
+              color: accent,
+              fontWeight: FontWeight.w600,
+            ),
+          )
+        else
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onToggleUnlearned,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '$learnedCount / 100',
+                  style: TextStyle(
+                    fontSize: 15,
+                    color: sub,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
-              ),
+                Icon(Icons.chevron_right, size: 15, color: sub),
+              ],
             ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    book.title,
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                      color: textColor,
-                      letterSpacing: -0.3,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 8),
-// 进度行：>= 总词数 → 绿色 100/100 + 无 chevron；
-  //             < 总词数 → X/100 + chevron，点击切换"只显示未学"
-  if (completed)
-                    Text(
-                      '100/100',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: accent,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: -0.1,
-                      ),
-                    )
-                  else
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: onToggleUnlearned,
-                      child: Row(
-                        children: [
-                          Text(
-                            '$learnedCount / 100',
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: sub,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(width: 2),
-                          Icon(Icons.chevron_right, size: 14, color: sub),
-                        ],
-                      ),
-                    ),
-                    // 已学 X/100 + chevron 触发"只显示未学"
-                  const SizedBox(height: 6),
-                  Text(
-                    '本书 ${book.words.length} 词',
-                    style: TextStyle(fontSize: 13, color: sub),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        SizedBox(height: MediaQuery.of(context).size.height * 0.032),
-        // 不加 AnimatedSize：点「加入/已加入」时左按钮原地切换文案，
-        // 「开始背诵」位置固定不动（无推动动画）
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // 未加入 / 已加入：外框颜色不变，只换图标和文案
-            _ActionButton(
-              label: isInShelf ? '已加入书架列表' : '加入书架列表',
-              icon: isInShelf
-                  ? Text('✓',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        height: 1,
-                        color: textColor,
-                      ))
-                  : Icon(Icons.bookmark_add_outlined,
-                      size: 14, color: textColor),
-              primary: false,
-              onTap: onAddToShelf,
-            ),
-            const SizedBox(width: 10),
-            _ActionButton(
-              label: '开始背诵',
-              icon: Icon(Icons.play_arrow, size: 14, color: textColor),
-              primary: false,
-              onTap: onStart,
-            ),
-          ],
+          ),
+        const SizedBox(height: 6),
+        Text(
+          '小学英语 · 入门 · ${book.words.length} 词',
+          style: TextStyle(fontSize: 13, color: sub),
         ),
       ],
+    );
+  }
+
+  Widget _playButton(Color appleMusicRed, double coverSize) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onStart,
+      child: Container(
+        width: coverSize,
+        height: 48,
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF2C2C2E) : const Color(0xFFF2F2F7),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.play_arrow, size: 20, color: appleMusicRed),
+            const SizedBox(width: 6),
+            Text(
+              '开始背诵',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: appleMusicRed,
+                letterSpacing: -0.2,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -2903,8 +3208,8 @@ class _ActionButtonState extends State<_ActionButton>
     final border = widget.primary
         ? primary
         : (isDark
-            ? Colors.white.withValues(alpha: 0.16)
-            : Colors.black.withValues(alpha: 0.12));
+              ? Colors.white.withValues(alpha: 0.16)
+              : Colors.black.withValues(alpha: 0.12));
     final fg = widget.primary
         ? primary
         : Theme.of(context).colorScheme.onSurface;
@@ -2945,74 +3250,6 @@ class _ActionButtonState extends State<_ActionButton>
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-// 搜索框：描边胶囊设计（与「开始背诵」按钮一致），仅搜索单词
-class _SearchBar extends StatelessWidget {
-  final TextEditingController controller;
-  final Color surface;
-  final Color sub;
-  final Color textColor;
-  final VoidCallback onChanged;
-
-  const _SearchBar({
-    required this.controller,
-    required this.surface,
-    required this.sub,
-    required this.textColor,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final border = isDark
-        ? Colors.white.withValues(alpha: 0.16)
-        : Colors.black.withValues(alpha: 0.12);
-    return Padding(
-      padding: const EdgeInsets.only(top: 6, bottom: 10),
-      child: Container(
-        height: 36,
-        decoration: BoxDecoration(
-          color: Colors.transparent,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: border, width: 1.0),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            const SizedBox(width: 12),
-            Icon(
-              Icons.search,
-              color: sub,
-              size: 16,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextField(
-                controller: controller,
-                onChanged: (_) => onChanged(),
-                textAlignVertical: TextAlignVertical.center,
-                style: TextStyle(
-                  color: textColor,
-                  fontSize: 14,
-                  height: 1,
-                ),
-                decoration: InputDecoration(
-                  hintText: '搜索单词',
-                  hintStyle: TextStyle(color: sub, fontSize: 14, height: 1),
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.zero,
-                  isCollapsed: true,
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-          ],
         ),
       ),
     );
@@ -3067,9 +3304,7 @@ class _WordListItem extends StatelessWidget {
         onTap: () => onPronounce(word),
         child: Container(
           decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: divider, width: 0.5),
-            ),
+            border: Border(bottom: BorderSide(color: divider, width: 0.5)),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 0),
           child: Row(
