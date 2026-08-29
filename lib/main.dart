@@ -1261,15 +1261,35 @@ class _CategoryBookCover extends StatelessWidget {
 /// 这里用一条平滑对称的 easeInOut 当唯一的几何时钟，尺寸再线性跟随它。
 const Curve _kOpenCurve = Curves.easeInOut;
 
-/// 「复制的图片」浮现时机，用**终点尺寸占比**定义（从 Apple 逐帧量出来的）：
-/// 那一刻卡片（框框）的宽 = 终点满屏宽的 68%，高 = 终点满屏高的 55%。
-/// 写成占比而不是写死进度值，换设备 / 换卡片宽高比都能自动适配。
-const double kCopyTriggerWidthRatio = 0.68;
-const double kCopyTriggerHeightRatio = 0.55;
-/// 复制图淡入 / 原图淡出共用的窗口长度（占整段动画的比例）。
+/// 「复制的图片」浮现时机：
+/// 当「原图宽度 = 卡片宽度的 2/3」时出现，即卡片宽度 = 原图宽度的 1.5 倍。
+/// 写成相对于源卡片的倍数，换源卡片比例也能自适应。
+const double kCopyTriggerOriginMultiplier = 1.5;
+/// 卡片**高度进度**与**宽度进度**的关系指数：`h = w^p`。
+///
+/// 由用户从 Apple 逐帧量出来的卡片尺寸拟合得到（源卡 104×138，满屏 400×860）：
+///   207/316  238/379  263/448  287/514  309/571  340/669  349/700  400/860
+/// 换算成归一化进度 `(W-W0)/(W1-W0)` 与 `(H-H0)/(H1-H0)` 后做 log-log 过原点
+/// 最小二乘，得 **p = 1.352**（p=1.36 时最大误差 6px、RMS 3.6px，<1%）。
+///
+/// p > 1 → 高度进度**落后于**宽度进度：卡片先变宽、再慢慢变高，
+/// 全程宽高比从 0.754 单调收敛到 0.446，是自然的「长大」过程。
+/// ⚠️ 之前 p 被"触发点高度 = 55% 满屏"这个约束反解成 0.477（<1，高度反而
+/// 跑在宽度前面），触发时卡片是 156×455 的细长条，整页内容硬塞进去 →
+/// 看起来就是一张不动的缩略图。以这份实测数据为准。
+const double kCardHeightProgressPow = 1.352;
+/// 复制图淡入 / 原图淡出的交叠窗口长度（占整段动画的比例），
+/// 窗口以「原图宽 = 卡片宽 2/3」那一刻为**中心**。
 const double kCopyFadeSpan = 0.20;
-/// 原图相对复制图的基础透明度折扣：原图要「稍微比复制图低一些」。
-const double kSrcOpacityBias = 0.78;
+/// 卡片透明度的三个锚点：起点 / 触发点（原图宽 = 卡片宽 2/3 时）/ 满屏。
+/// 三者用一条幂曲线连起来，是连续过程；改这里的数值不会造成跳变。
+const double kCardOpacityStart = 0.25;
+const double kCardOpacityAtTrigger = 0.50;
+
+/// 动画时长（毫秒）。调优阶段放慢方便逐帧截图对比，定稿后改回 780 / 560。
+/// 想再快/再慢只改这两个数即可。
+const int kOpenDurationMs = 1800;
+const int kCloseDurationMs = 1400;
 
 /// Apple Music 风格打开动画路由：用 `PopupRoute` 替代 `PageRouteBuilder(opaque:false)`，
 /// 既保留「旧首页可见 + 卡片扩展 + 封面飞行」效果，又避免 web 下自定义 page route 的 pop 失灵。
@@ -1293,11 +1313,12 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
   bool get opaque => false;
 
   @override
-  // 测试阶段放慢到 2.5s，方便逐帧截图对比；调优完成后可改回 780ms。
-  Duration get transitionDuration => const Duration(milliseconds: 2500);
+  Duration get transitionDuration =>
+      const Duration(milliseconds: kOpenDurationMs);
 
   @override
-  Duration get reverseTransitionDuration => const Duration(milliseconds: 2000);
+  Duration get reverseTransitionDuration =>
+      const Duration(milliseconds: kCloseDurationMs);
 
   @override
   Widget buildPage(
@@ -1352,21 +1373,15 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
 
             // ---------- ① 卡片几何：源卡片 → 满屏 ----------
             // 起点就是被点那张卡片本身（位置/宽高一致），终点满屏。
-            // 宽用线性插值 pw = g；高用 ph = g^p —— 指数 p 由「触发点同时满足
-            // 终点宽的 68% / 终点高的 55%」反解出来，全程连续，绝不会跳变。
-            final triggerG = ((kCopyTriggerWidthRatio * size.width -
-                        originRect.width) /
-                    (size.width - originRect.width))
-                .clamp(0.001, 0.999);
-            final triggerH = ((kCopyTriggerHeightRatio * size.height -
-                        originRect.height) /
-                    (size.height - originRect.height))
-                .clamp(0.001, 0.999);
-            // ph(g) = g^p，令 ph(triggerG) == triggerH → p = ln(triggerH)/ln(triggerG)
-            final hPow =
-                (math.log(triggerH) / math.log(triggerG)).clamp(0.4, 3.0);
+            // 宽进度 pw = g 线性；高进度 ph = pw^p，指数 p = kCardHeightProgressPow
+            // （从 Apple 实测的卡片尺寸序列拟合而来）。全程连续，绝不会跳变。
+            final triggerG =
+                ((kCopyTriggerOriginMultiplier * originRect.width -
+                            originRect.width) /
+                        (size.width - originRect.width))
+                    .clamp(0.001, 0.999);
             final pw = g;
-            final ph = math.pow(g, hPow).toDouble();
+            final ph = math.pow(pw, kCardHeightProgressPow).toDouble();
             final cardRect = Rect.fromLTWH(
               originRect.left * (1 - pw),
               originRect.top * (1 - pw),
@@ -1374,10 +1389,22 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
               originRect.height + (size.height - originRect.height) * ph,
             );
 
-            // ---------- ② 透明度由卡片尺寸驱动 ----------
-            // 满屏 = 100% 不透明，全程连续。
-            final fill = pw;
-            final cardOpacity = (0.25 + 0.75 * fill).clamp(0.0, 1.0);
+            // ---------- ② 卡片透明度：起点 → 触发点 50% → 满屏 100% ----------
+            // 三个锚点用**一条幂曲线**同时穿过，是连续过程；
+            // 在某个点硬切数值（比如 if(到 2/3) 就设 0.5）就会跳变。
+            // 解 kStart + (1-kStart) * g^p = kTrigger
+            //   → g^p = (kTrigger - kStart)/(1 - kStart)
+            //   → p   = ln((kTrigger - kStart)/(1 - kStart)) / ln(triggerG)
+            // triggerG 由几何算出，换设备 / 换卡片比例都不用改数值。
+            final target = (((kCardOpacityAtTrigger - kCardOpacityStart) /
+                    (1.0 - kCardOpacityStart))
+                .clamp(0.01, 0.99));
+            final cardFillPow =
+                (math.log(target) / math.log(triggerG)).clamp(0.15, 6.0);
+            final fill = math.pow(g, cardFillPow).toDouble();
+            final cardOpacity =
+                (kCardOpacityStart + (1.0 - kCardOpacityStart) * fill)
+                    .clamp(0.0, 1.0);
 
             // 圆角矩形：前 75% 保持 22，最后 25% 才收方（全程都是圆角矩形）
             final radiusT = ((g - 0.75) / 0.25).clamp(0.0, 1.0);
@@ -1387,12 +1414,17 @@ class _AppleOpenRoute<T> extends PopupRoute<T> {
             // 整页按 s = 卡片宽度 / 屏宽 等比缩小，左上角钉在卡片左上角，裁进卡片。
             // g=1 时 s=1、卡片=满屏，内容正好等于页面本体 —— 终点不需要换图。
             final s = (cardRect.width / size.width).clamp(0.0, 1.0);
-            // 交叠进度 u：0 = 还没到触发点，1 = 复制图完全接管。
-            final u = ((g - triggerG) / kCopyFadeSpan).clamp(0.0, 1.0);
+            // 交叠进度 u —— 窗口以**触发点为中心**，而不是从触发点才开始：
+            //   u=0    窗口起点，复制图开始浮现（原图最实）
+            //   u=0.5  触发点（原图宽 = 卡片宽 2/3），两者透明度**相等**
+            //   u=1    窗口末尾，复制图完全接管，原图归零
+            // 这样"相等"是由曲线自然穿过，不是在某个点硬赋同一个值，不会跳变。
+            final u = ((g - (triggerG - kCopyFadeSpan * 0.5)) / kCopyFadeSpan)
+                .clamp(0.0, 1.0);
             final copyFade = u;
-            // 原图：三次方快速退场 + 基础折扣，保证「复制图的透明度比原图高一些」。
-            // u≈0.29 之后复制图就一定压过原图，且全程连续无跳变。
-            final srcFade = kSrcOpacityBias * math.pow(1 - u, 3);
+            // 原图与复制图互补：u<0.5 时原图更实（"稍微实一些"），
+            // u=0.5 恰好相等，u>0.5 后复制图接管并把原图推到 0。
+            final srcFade = 1.0 - u;
 
             // ---------- ④ 原图：钉在卡片左上角，保持原始尺寸 ----------
             // 不飞、不缩放：它就是被点那张封面，跟着卡片左上角一起被顶上去。
